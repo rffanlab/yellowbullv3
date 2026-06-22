@@ -1,0 +1,34 @@
+# YellowBull Agent — Default Configuration
+# Environment variables can be referenced as ${VAR_NAME}
+
+llm:
+  active: "openai"
+  providers:
+    openai:
+      api_key: "${OPENAI_API_KEY}"
+      model: "gpt-4o-mini"
+      temperature: 0.7
+      max_tokens: 4096
+      timeout: 60.0
+
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      model: "claude-sonnet-4-20250514"
+      temperature: 0.7
+      max_tokens: 4096
+      timeout: 60.0
+
+agent:
+  system_prompt: |
+    You are a helpful AI assistant. You can use tools to help answer questions.
+    Think step by step and provide clear, accurate responses.
+    When you need real-time information or calculations, use the available tools.
+  max_chain_depth: 5
+  context_window: 48
+  tool_retry_limit: 2
+  max_tool_calls_per_turn: 5
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
