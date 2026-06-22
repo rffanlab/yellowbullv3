@@ -8,7 +8,7 @@ def create_llm(provider: str, config: dict) -> BaseLLM:
 
     Args:
         provider: Provider identifier ('openai', 'anthropic')
-        config: Provider-specific configuration dict
+        config: Provider-specific configuration dict or Pydantic model
 
     Returns:
         Configured LLM instance
@@ -16,6 +16,10 @@ def create_llm(provider: str, config: dict) -> BaseLLM:
     Raises:
         ValueError: If provider is not supported
     """
+    # Handle both dict and Pydantic models
+    if hasattr(config, "model_dump"):
+        config = config.model_dump()
+
     kwargs = {
         "api_key": config.get("api_key", ""),
         "base_url": config.get("base_url"),

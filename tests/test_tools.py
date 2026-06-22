@@ -3,14 +3,6 @@
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def clean_registry():
-    from tools.registry import ToolRegistry
-    ToolRegistry.clear()
-    yield
-    ToolRegistry.clear()
-
-
 async def test_current_time_tool():
     """Test current time tool returns valid datetime string."""
     # Import to trigger registration
@@ -108,7 +100,7 @@ async def test_tool_registry():
 
 
 async def test_tool_retry_on_failure():
-    """Test that agent retries failed tool calls."""
+    """Test that execute_with_retry retries failed tool calls."""
     from tools.base import BaseTool, ToolInfo, ToolResult
     from tools.registry import ToolRegistry
 
@@ -133,6 +125,6 @@ async def test_tool_retry_on_failure():
     ToolRegistry.register(FlakyTool())
     tool = ToolRegistry.get("flaky")
 
-    result = await tool.execute()
+    result = await tool.execute_with_retry(max_retries=1)
     assert result.success
     assert call_count == 2

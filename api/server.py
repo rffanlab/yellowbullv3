@@ -88,5 +88,10 @@ def create_app() -> FastAPI:
     return app
 
 
-# Keep module-level `app` for direct import (non-factory mode)
-app = create_app()
+# Module-level app for direct uvicorn usage (no --factory flag needed)
+app = FastAPI(title="YellowBull Agent API", version="0.1.0")
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}

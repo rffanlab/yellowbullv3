@@ -71,9 +71,12 @@ def load_settings(config_path: str | None = None) -> Settings:
     path = Path(config_path)
     raw_config: dict[str, Any] = {}
 
-    if path.exists():
-        with open(path) as f:
-            raw_config = yaml.safe_load(f) or {}
+    try:
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                raw_config = yaml.safe_load(f) or {}
+    except (FileNotFoundError, UnicodeDecodeError):
+        pass
 
     # Resolve environment variables
     raw_config = _resolve_env_vars(raw_config)

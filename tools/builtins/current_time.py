@@ -1,6 +1,6 @@
 """Current time tool."""
 
-from datetime import datetime, timezone, timedelta as td
+from datetime import datetime, timezone as dt_timezone, timedelta as td
 from typing import Any
 
 from tools.base import BaseTool, ToolInfo, ToolResult
@@ -29,7 +29,7 @@ class CurrentTimeTool(BaseTool):
     async def execute(self, timezone: str = "UTC") -> ToolResult:
         try:
             if timezone == "UTC":
-                tz = timezone.utc
+                tz = dt_timezone.utc
             else:
                 from zoneinfo import ZoneInfo
 

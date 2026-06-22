@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "yellowbull-agent"
 version = "0.1.0"
 description = "A general-purpose AI agent with tool calling, session management, and multi-provider LLM support"
-readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
@@ -44,6 +43,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
 
 [tool.mypy]
 python_version = "3.11"

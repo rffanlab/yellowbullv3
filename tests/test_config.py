@@ -32,7 +32,7 @@ def test_env_var_resolution():
 
 
 def test_missing_config_returns_defaults():
-    from config.settings import load_settings
+    from config.settings import Settings, load_settings
 
     settings = load_settings("nonexistent.yaml")
     assert isinstance(settings, Settings)
