@@ -7,7 +7,7 @@ import yaml
 
 
 def test_load_default_settings():
-    from config.settings import load_settings, Settings
+    from config.settings import Settings, load_settings
 
     settings = load_settings("config/default.yaml")
     assert isinstance(settings, Settings)

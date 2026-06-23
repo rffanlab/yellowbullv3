@@ -18,6 +18,7 @@ dependencies = [
     "anthropic>=0.42",
     "duckduckgo-search>=7.2",
     "tiktoken>=0.9",
+    "rich>=13.9",
     "aiofiles>=24.1",
 ]
 
@@ -52,3 +53,4 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+explicit_package_bases = true

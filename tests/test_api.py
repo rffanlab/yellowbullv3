@@ -2,13 +2,12 @@
 
 from unittest.mock import patch
 
-import pytest
-
 
 async def test_health_endpoint():
     """Test /api/health returns ok."""
-    from fastapi.testclient import TestClient
     from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
 
     mock_llm = AsyncMock()
     from llm.base import LLMResponse
@@ -28,10 +27,10 @@ async def test_health_endpoint():
 
 async def test_chat_endpoint():
     """Test /api/chat returns valid response."""
-    from fastapi.testclient import TestClient
-
     # Patch the LLM to return a simple response
     from unittest.mock import AsyncMock, patch
+
+    from fastapi.testclient import TestClient
 
     mock_llm = AsyncMock()
     from llm.base import LLMResponse
@@ -57,9 +56,9 @@ async def test_chat_endpoint():
 
 async def test_delete_session():
     """Test session deletion."""
-    from fastapi.testclient import TestClient
-
     from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
 
     mock_llm = AsyncMock()
     from llm.base import LLMResponse
@@ -87,9 +86,9 @@ async def test_delete_session():
 
 async def test_get_history():
     """Test session history endpoint."""
-    from fastapi.testclient import TestClient
-
     from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
 
     mock_llm = AsyncMock()
     from llm.base import LLMResponse
@@ -119,9 +118,9 @@ async def test_get_history():
 
 async def test_delete_nonexistent_session():
     """Test deleting a session that doesn't exist returns 404."""
-    from fastapi.testclient import TestClient
-
     from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
 
     mock_llm = AsyncMock()
     from llm.base import LLMResponse
@@ -141,9 +140,9 @@ async def test_delete_nonexistent_session():
 
 async def test_chat_with_tool_calls():
     """Test chat endpoint with tool calling flow."""
-    from fastapi.testclient import TestClient
-
     from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
 
     # First call returns tool call, second returns final answer
     mock_llm = AsyncMock()

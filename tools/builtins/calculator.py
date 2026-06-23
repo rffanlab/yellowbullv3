@@ -1,7 +1,6 @@
 """Calculator tool for math expressions."""
 
 import math
-from typing import Any
 
 from tools.base import BaseTool, ToolInfo, ToolResult
 from tools.registry import register_tool
@@ -9,7 +8,10 @@ from tools.registry import register_tool
 
 @register_tool(
     name="calculator",
-    description="Evaluate a mathematical expression. Supports arithmetic, powers, trig functions, etc.",
+    description=(
+        "Evaluate a mathematical expression. "
+        "Supports arithmetic, powers, trig functions, etc."
+    ),
     parameters={
         "type": "object",
         "properties": {

@@ -2,7 +2,7 @@
 
 from typing import Any, TypeVar
 
-from tools.base import BaseTool, ToolInfo
+from tools.base import BaseTool, ToolInfo, ToolResult
 
 T = TypeVar("T", bound=BaseTool)
 
@@ -21,6 +21,17 @@ class ToolRegistry:
     @classmethod
     def get(cls, name: str) -> BaseTool | None:
         return cls._tools.get(name)
+
+    @classmethod
+    async def resolve(cls, name: str, **kwargs: Any) -> ToolResult:
+        """Resolve and execute a tool by name with validation.
+
+        Validates parameters before execution. Returns error result if not found.
+        """
+        tool = cls._tools.get(name)
+        if tool is None:
+            return ToolResult(content=f"Unknown tool: {name}", success=False)
+        return await tool.execute_with_retry(**kwargs)
 
     @classmethod
     def list_all(cls) -> list[BaseTool]:

@@ -1,12 +1,13 @@
 """Base LLM abstraction with streaming support."""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncIterator
+from enum import StrEnum
+from typing import Any
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"

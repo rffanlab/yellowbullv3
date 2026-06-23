@@ -1,7 +1,8 @@
 """Anthropic Claude LLM provider."""
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -110,32 +111,58 @@ class AnthropicLLM(BaseLLM):
         if tools:
             kwargs["tools"] = self._format_tools(tools)
 
+        # Accumulate tool calls across delta events (same pattern as OpenAI)
+        accumulated_tool_calls: dict[str, dict[str, Any]] = {}
+
         async with self.client.messages.stream(**kwargs) as stream:
             async for event in stream:
-                if event.type == "content_block_delta":
-                    delta = event.delta
-                    if hasattr(delta, "text") and delta.text:
-                        yield StreamChunk(delta=delta.text)
-                elif event.type == "content_block_start":
+                if event.type == "content_block_start":
                     block = event.content_block
                     if hasattr(block, "type") and block.type == "tool_use":
-                        tc = {
-                            "id": getattr(block, "id", ""),
+                        tc_id = getattr(block, "id", "")
+                        accumulated_tool_calls[tc_id] = {
+                            "id": tc_id,
+                            "type": "function",
                             "function": {
                                 "name": getattr(block, "name", ""),
                                 "arguments": "",
                             },
                         }
-                        yield StreamChunk(tool_call=tc)
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if hasattr(delta, "text") and delta.text:
+                        yield StreamChunk(delta=delta.text)
+                    # Accumulate tool_use input deltas
+                    if hasattr(delta, "partial_json"):
+                        partial = getattr(delta, "partial_json", "") or ""
+                        if partial:
+                            # Find which tool call this belongs to (last one started)
+                            for tc_id in reversed(list(accumulated_tool_calls.keys())):
+                                accumulated_tool_calls[tc_id]["function"]["arguments"] += partial
+                                break
+
+        # Yield final accumulated tool calls
+        for call in accumulated_tool_calls.values():
+            yield StreamChunk(tool_call=call)
 
         yield StreamChunk(done=True)
 
     def count_tokens(self, text: str) -> int:
         """Count tokens using Anthropic tokenizer."""
-        import anthropic
+        try:
+            tokenizer = self._get_tokenizer()
+            return len(tokenizer.encode(text))
+        except Exception:
+            # Fallback estimation
+            return max(1, len(text.encode("utf-8")) // 4)
 
-        # Use a simple estimation if tokenizer not available
-        return len(text.encode("utf-8")) // 4
+    def _get_tokenizer(self):
+        """Lazy-load Anthropic tokenizer."""
+        if not hasattr(self, "_tokenizer"):
+            from anthropic import Tokenizer
+
+            self._tokenizer = Tokenizer()
+        return self._tokenizer
 
     def _format_tools(self, tools: list[dict[str, Any]]) -> list[dict]:
         """Convert OpenAI-style tools to Anthropic format."""

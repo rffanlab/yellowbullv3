@@ -1,7 +1,7 @@
 """OpenAI-compatible LLM provider."""
 
-import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -76,7 +76,6 @@ class OpenAILLM(BaseLLM):
         stream = await self.client.chat.completions.create(**kwargs)
 
         accumulated_tool_calls: dict[str, Any] = {}
-        has_tool_call = False
 
         async for chunk in stream:
             choice = chunk.choices[0] if chunk.choices else None
@@ -87,7 +86,6 @@ class OpenAILLM(BaseLLM):
 
             # Handle tool calls
             if delta.tool_calls:
-                has_tool_call = True
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in accumulated_tool_calls:
@@ -110,7 +108,7 @@ class OpenAILLM(BaseLLM):
             yield StreamChunk(delta=text_delta)
 
         # Yield final tool calls
-        if has_tool_calls:
+        if accumulated_tool_calls:
             for call in accumulated_tool_calls.values():
                 yield StreamChunk(tool_call=call)
 

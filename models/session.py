@@ -1,10 +1,8 @@
 """Session models for conversation state management."""
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
-
-import uuid
 
 from models.message import Message, MessageRole
 
@@ -34,4 +32,5 @@ class Session:
     def get_context_messages(self, window_size: int) -> list[Message]:
         """Sliding window: keep system messages + last N non-system messages."""
         non_system = [m for m in self.messages if m.role != MessageRole.SYSTEM]
-        return [m for m in self.messages if m.role == MessageRole.SYSTEM] + non_system[-window_size:]
+        system_msgs = [m for m in self.messages if m.role == MessageRole.SYSTEM]
+        return system_msgs + non_system[-window_size:]

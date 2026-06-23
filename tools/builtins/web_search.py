@@ -1,6 +1,5 @@
 """Web search tool."""
 
-from typing import Any
 
 from tools.base import BaseTool, ToolInfo, ToolResult
 from tools.registry import register_tool
@@ -8,7 +7,10 @@ from tools.registry import register_tool
 
 @register_tool(
     name="web_search",
-    description="Search the internet for up-to-date information. Use for news, facts, and real-time queries.",
+    description=(
+        "Search the internet for up-to-date information. "
+        "Use for news, facts, and real-time queries."
+    ),
     parameters={
         "type": "object",
         "properties": {

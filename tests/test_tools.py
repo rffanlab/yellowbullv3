@@ -1,13 +1,11 @@
 """Tests for tool system."""
 
-import pytest
 
 
 async def test_current_time_tool():
     """Test current time tool returns valid datetime string."""
     # Import to trigger registration
     from tools.builtins.current_time import CurrentTimeTool  # noqa: F401
-
     from tools.registry import ToolRegistry
 
     tool = ToolRegistry.get("current_time")

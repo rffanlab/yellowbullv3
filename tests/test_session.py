@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta
 
-import pytest
-
 
 def test_create_session():
     from core.session_manager import SessionManager
@@ -36,7 +34,6 @@ def test_delete_session():
 
 def test_cleanup_expired():
     from core.session_manager import SessionManager
-    from models.session import Session
 
     mgr = SessionManager()
     s = mgr.create("u1")
@@ -149,7 +146,6 @@ async def test_agent_max_chain_depth():
 
 async def test_context_builder():
     """Test context builder converts messages correctly."""
-    from config.settings import Settings
     from core.context_builder import ContextBuilder
     from models.message import Message, MessageRole
     from models.session import Session
@@ -172,7 +168,6 @@ async def test_context_builder():
 
 async def test_context_builder_with_tool_calls():
     """Test context builder handles tool call messages."""
-    from config.settings import Settings
     from core.context_builder import ContextBuilder
     from models.message import Message, MessageRole
     from models.session import Session
