@@ -40,39 +40,6 @@ class SessionInfo(BaseModel):
     updated_at: str
 
 
-# ── Rate Limiter Middleware ─────────────────────────────────────────────
-
-
-class RateLimiter:
-    """Simple in-memory sliding-window rate limiter."""
-
-    def __init__(self, max_requests: int = 60, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self._requests: dict[str, list[float]] = defaultdict(list)
-
-    def is_allowed(self, key: str) -> bool:
-        now = time.time()
-        cutoff = now - self.window_seconds
-        # Prune old entries
-        self._requests[key] = [t for t in self._requests[key] if t > cutoff]
-        if len(self._requests[key]) >= self.max_requests:
-            return False
-        self._requests[key].append(now)
-        return True
-
-
-_rate_limiter = RateLimiter()
-
-
-async def rate_limit_middleware(request, call_next):
-    """FastAPI middleware for per-IP rate limiting."""
-    client_ip = request.client.host if request.client else "unknown"
-    if not _rate_limiter.is_allowed(client_ip):
-        return HTTPException(429, "Rate limit exceeded")
-    return await call_next(request)
-
-
 # ── SSE Streaming Helper ───────────────────────────────────────────────
 
 
@@ -169,7 +136,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.middleware("http")(rate_limit_middleware)
 
     # Initialize agent
     settings = load_settings()
@@ -177,6 +143,31 @@ def create_app() -> FastAPI:
     llm = create_llm(settings.llm.active, llm_config)
     global _agent
     _agent = Agent(settings, llm)
+
+    # ── Security middleware (order matters: auth → rate limit) ────────
+    from api.middleware.api_key_auth import APIKeyAuthMiddleware
+    from api.middleware.rate_limit import RateLimitMiddleware
+
+    sec = settings.security
+    app.add_middleware(
+        APIKeyAuthMiddleware,
+        enabled=sec.api_key_auth_enabled,
+        api_keys=set(sec.api_keys),
+    )
+    app.add_middleware(
+        RateLimitMiddleware,
+        enabled=sec.rate_limit_enabled,
+        max_requests=sec.rate_limit_requests,
+        window_seconds=sec.rate_limit_window_seconds,
+    )
+
+    # ── Input validation helper (used in chat endpoints) ──────────────
+    from core.security.input_validation import InputValidator
+
+    _input_validator = InputValidator(
+        max_length=sec.max_message_length,
+        injection_detection=sec.prompt_injection_detection,
+    )
 
     # ── Chat endpoints ───────────────────────────────────────────────
 
@@ -293,7 +284,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict:
-        return {"status": "ok"}
+        """Health endpoint for container orchestration."""
+        return {
+            "status": "ok",
+            "version": settings.app.version if hasattr(settings, "app") else "0.1.0",
+            "llm_provider": settings.llm.active,
+            "sessions_active": len(_agent.session_manager._sessions) if _agent else 0,
+        }
 
     return app
 

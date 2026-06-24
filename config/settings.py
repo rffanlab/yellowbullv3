@@ -53,8 +53,22 @@ class AgentConfig(BaseModel):
     max_tool_calls_per_turn: int = 5
 
 
+class SecuritySettings(BaseModel):
+    """Security configuration."""
+
+    rate_limit_enabled: bool = False
+    rate_limit_requests: int = 60
+    rate_limit_window_seconds: int = 60
+    max_message_length: int = 4096
+    prompt_injection_detection: bool = True
+    api_key_auth_enabled: bool = False
+    api_keys: list[str] = []
+
+
 class ServerConfig(BaseModel):
-    host: str = "0.0.0.0"
+    """Server configuration."""
+
+    host: str = "127.0.0.1"
     port: int = 8000
     debug: bool = False
 
@@ -63,6 +77,7 @@ class Settings(BaseModel):
     llm: LLMConfig = LLMConfig()
     agent: AgentConfig = AgentConfig()
     server: ServerConfig = ServerConfig()
+    security: SecuritySettings = SecuritySettings()
 
     # ── Schema validation ────────────────────────────────────────────
 
