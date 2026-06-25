@@ -15,12 +15,13 @@ class AnthropicLLM(BaseLLM):
 
     def __init__(
         self,
-        api_key: str = "",
+        *,
+        api_key: str,
         base_url: str | None = None,
-        model: str = "claude-sonnet-4-20250514",
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        timeout: float = 60.0,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: float,
     ):
         self.model_name = model
         self.temperature = temperature

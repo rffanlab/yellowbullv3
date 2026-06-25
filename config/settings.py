@@ -34,7 +34,7 @@ class LLMProviderConfig(BaseModel):
     model: str = "gpt-4o"
     temperature: float = 0.7
     max_tokens: int = 4096
-    timeout: float = 60.0
+    timeout: float = 3000.0
 
 
 class LLMConfig(BaseModel):
@@ -42,15 +42,28 @@ class LLMConfig(BaseModel):
     providers: dict[str, LLMProviderConfig] = {}
 
 
+class ToolExecutorConfig(BaseModel):
+    """Tool execution engine configuration."""
+
+    tool_timeout_seconds: float = 30.0
+    max_concurrent_tools: int = 5
+    enable_cache: bool = False
+    cache_ttl_seconds: float = 300.0
+    cache_max_size: int = 64
+    retry_max_attempts: int = 1
+    retry_backoff_factor: float = 1.0
+
+
 class AgentConfig(BaseModel):
     system_prompt: str = (
         "You are a helpful AI assistant. You can use tools to help answer questions. "
         "Think step by step and provide clear, accurate responses."
     )
-    max_chain_depth: int = 5
+    max_chain_depth: int = 20
     context_window: int = 48
     tool_retry_limit: int = 2
     max_tool_calls_per_turn: int = 5
+    tools: ToolExecutorConfig = ToolExecutorConfig()
 
 
 class SecuritySettings(BaseModel):

@@ -19,6 +19,7 @@ yellowbullv3/
 │   ├── __init__.py
 │   ├── agent.py             # Agent 核心编排
 │   ├── session_manager.py   # 会话管理
+│   ├── tool_executor.py     # 工具执行引擎（超时、重试、并行调度）
 │   └── context_builder.py   # Prompt 上下文构建
 ├── llm/
 │   ├── __init__.py

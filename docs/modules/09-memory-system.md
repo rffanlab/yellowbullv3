@@ -467,3 +467,166 @@ memory:
 | **自动提取** | LLM 驱动的对话事实识别，会话后异步写入 |
 | **用户隔离** | 按 user_id 过滤，确保多租户安全 |
 | **手动管理** | API 支持显式添加/删除/查询记忆条目 |
+
+---
+
+## 8. 隐私控制与跨会话记忆
+
+### 8.1. 设计目标
+
+- **用户隐私隔离**：确保不同用户的记忆数据完全隔离
+- **敏感信息保护**：自动识别和脱敏 PII（个人身份信息）
+- **跨会话持久化**：关键记忆在会话结束后保留，供未来会话使用
+
+### 8.2. 隐私控制 `memory/privacy.py`
+
+```python
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class MemoryPrivacyLevel(str, Enum):
+    PUBLIC = "public"           # 公开：可被所有模块访问
+    SESSION_ONLY = "session_only"  # 会话级：仅当前会话可见
+    PRIVATE = "private"         # 私有：仅用户本人和授权模块可见
+    ENCRYPTED = "encrypted"     # 加密存储
+
+
+@dataclass(frozen=True)
+class PrivacyPolicy:
+    """记忆隐私策略"""
+    default_level: MemoryPrivacyLevel = MemoryPrivacyLevel.PRIVATE
+    auto_pii_detection: bool = True       # 自动检测 PII
+    auto_encrypt_sensitive: bool = True   # 加密敏感信息
+    retention_days: int = 30              # 默认保留天数
+
+
+class PrivacyController:
+    """隐私控制器"""
+
+    def __init__(self, policy: PrivacyPolicy | None = None):
+        self._policy = policy or PrivacyPolicy()
+
+    def classify(self, content: str) -> MemoryPrivacyLevel:
+        """根据内容自动分类隐私级别"""
+        if not self._policy.auto_pii_detection:
+            return self._policy.default_level
+
+        # 检测 PII（手机号、身份证号等）
+        import re
+        pii_patterns = [
+            r"1[3-9]\d{9}",           # 手机号
+            r"\b\d{17}[\dxX]\b",      # 身份证号
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",  # 邮箱
+        ]
+
+        for pattern in pii_patterns:
+            if re.search(pattern, content):
+                return MemoryPrivacyLevel.ENCRYPTED
+
+        return self._policy.default_level
+
+    def should_encrypt(self, privacy_level: MemoryPrivacyLevel) -> bool:
+        """判断是否需要加密"""
+        return (
+            self._policy.auto_encrypt_sensitive and
+            privacy_level == MemoryPrivacyLevel.ENCRYPTED
+        )
+```
+
+### 8.3. 跨会话记忆持久化 `memory/cross_session.py`
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class CrossSessionMemory:
+    """跨会话记忆条目"""
+    user_id: str                    # 用户 ID
+    content: str                    # 记忆内容
+    category: str                   # 分类：preference | fact | decision | goal
+    confidence: float = 0.5         # 置信度 [0, 1]
+    created_at: int = 0             # 创建时间戳
+    last_accessed_at: int = 0       # 最后访问时间戳
+    access_count: int = 0           # 访问次数
+
+
+class CrossSessionMemoryStore:
+    """跨会话记忆存储"""
+
+    def __init__(self, storage_backend):
+        self._storage = storage_backend
+
+    async def add(self, memory: CrossSessionMemory) -> None:
+        """添加跨会话记忆"""
+        await self._storage.put(
+            key=f"cross_session:{memory.user_id}:{memory.category}",
+            value=memory.__dict__,
+            ttl=self._policy.retention_days * 86400,
+        )
+
+    async def retrieve(
+        self, user_id: str, query: str, limit: int = 5
+    ) -> list[CrossSessionMemory]:
+        """检索相关记忆"""
+        # 语义搜索 + 用户过滤
+        results = await self._storage.query(
+            collection="cross_session_memories",
+            filter={"user_id": user_id},
+            query=query,
+            limit=limit,
+        )
+
+        memories = [CrossSessionMemory(**r) for r in results]
+
+        # 更新访问统计
+        for m in memories:
+            await self._update_access_stats(m.user_id, m.content)
+
+        return memories
+
+    async def _update_access_stats(self, user_id: str, content: str) -> None:
+        """更新记忆访问统计"""
+        pass  # TODO: 实现原子递增
+```
+
+### 8.4. Agent Core 集成
+
+在 `agent/core.py` 中，会话结束时自动提取关键记忆：
+
+```python
+async def on_session_end(self, session_id: str):
+    """会话结束时的记忆处理"""
+    conversation = await self.memory.get_conversation(session_id)
+
+    # LLM 驱动的关键信息提取
+    key_memories = await self._extract_key_memories(conversation)
+
+    for memory in key_memories:
+        privacy_level = self.privacy_controller.classify(memory.content)
+        cross_session = CrossSessionMemory(
+            user_id=self.session_manager.get_user_id(session_id),
+            content=memory.content,
+            category=memory.category,
+            confidence=memory.confidence,
+        )
+        await self.cross_session_store.add(cross_session)
+
+    # 清理短期记忆（会话级）
+    await self.memory.clear_short_term(session_id)
+```
+
+---
+
+## 9. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **短期记忆** | Token 预算滑动窗口 + 可选对话摘要压缩 |
+| **长期记忆** | 向量存储语义检索 + TTL 过期控制 |
+| **自动提取** | LLM 驱动的对话事实识别，会话后异步写入 |
+| **用户隔离** | 按 user_id 过滤，确保多租户安全 |
+| **手动管理** | API 支持显式添加/删除/查询记忆条目 |
+| **隐私控制** | PrivacyController 自动分类 + PII 检测 + 加密存储 |
+| **跨会话持久化** | CrossSessionMemoryStore 保留关键信息供未来使用 |

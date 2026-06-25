@@ -1187,3 +1187,154 @@ class FailoverLLM(BaseLLM):
 | **故障降级** | `FailoverLLM` 装饰器模式，配置 `fallback_providers` 链 |
 | **Token 估算** | 抽象 `count_tokens()`，各 provider 用最优方式实现 |
 | **热更新友好** | `create_llm()` 随时重建实例，ConfigManager 回调触发切换 |
+
+---
+
+## 11. 结构化输出增强（JSON Mode / Function Calling）
+
+### 11.1. 设计目标
+
+在 LLM 抽象层原生支持结构化输出约束：
+- **JSON Mode**：强制 LLM 返回合法 JSON
+- **Function Calling**：通过 schema 定义约束输出结构
+- **Pydantic Parser**：自动将响应解析为 Pydantic 模型
+
+### 11.2. OpenAI Provider 增强 `llm/providers/openai_provider.py`
+
+```python
+class OpenAIProvider(LLMProvider):
+    """OpenAI provider with structured output support"""
+
+    async def generate_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+        function_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        """
+        生成结构化输出。
+
+        Args:
+            messages:       消息列表
+            response_format: JSON Schema 格式约束（OpenAI JSON mode）
+            function_schema: Function calling schema
+        """
+        kwargs: dict[str, Any] = {
+            "model": self._config.model_name,
+            "messages": messages,
+            "temperature": self._config.temperature,
+        }
+
+        if response_format:
+            kwargs["response_format"] = {"type": "json_schema", "json_schema": response_format}
+
+        if function_schema:
+            kwargs["tools"] = [function_schema]
+            kwargs["tool_choice"] = "required"
+
+        response = await self._client.chat.completions.create(**kwargs)
+
+        # 处理 function calling 响应
+        if function_schema and response.choices[0].message.tool_calls:
+            tool_call = response.choices[0].message.tool_calls[0]
+            content = json.loads(tool_call.function.arguments)
+            return LLMResponse(
+                text=json.dumps(content),
+                structured_data=content,
+                usage=response.usage.model_dump() if response.usage else None,
+            )
+
+        return LLMResponse(
+            text=response.choices[0].message.content or "",
+            usage=response.usage.model_dump() if response.usage else None,
+        )
+```
+
+### 11.3. Anthropic Provider 增强 `llm/providers/anthropic_provider.py`
+
+```python
+class AnthropicProvider(LLMProvider):
+    """Anthropic provider with tool use support"""
+
+    async def generate_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+        function_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        """Anthropic 的结构化输出（通过 tool_use）"""
+        kwargs: dict[str, Any] = {
+            "model": self._config.model_name,
+            "messages": messages,
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens or 4096,
+        }
+
+        system_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
+        if system_msg:
+            kwargs["system"] = system_msg
+
+        if function_schema:
+            # Anthropic 使用 tools 参数
+            anthropic_tool = {
+                "name": function_schema.get("function", {}).get("name", "default"),
+                "description": function_schema.get("function", {}).get("description", ""),
+                "input_schema": function_schema.get("function", {}).get("parameters", {}),
+            }
+            kwargs["tools"] = [anthropic_tool]
+
+        response = await self._client.messages.create(**kwargs)
+
+        # 处理 tool_use 响应
+        if function_schema:
+            for block in response.content:
+                if block.type == "tool_use":
+                    return LLMResponse(
+                        text=json.dumps(block.input),
+                        structured_data=block.input,
+                        usage={"input_tokens": response.usage.input_tokens,
+                               "output_tokens": response.usage.output_tokens},
+                    )
+
+        content = "\n".join(b.text for b in response.content if b.type == "text")
+        return LLMResponse(
+            text=content,
+            usage={"input_tokens": response.usage.input_tokens,
+                   "output_tokens": response.usage.output_tokens},
+        )
+```
+
+### 11.4. LLMProvider ABC 扩展 `llm/protocol.py`
+
+```python
+class LLMProvider(Protocol):
+    """LLM provider protocol with structured output"""
+
+    async def generate(self, messages: list[dict[str, str]]) -> LLMResponse: ...
+
+    async def generate_stream(self, messages: list[dict[str, str]]) -> AsyncIterator[StreamChunk]: ...
+
+    async def generate_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+        function_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse: ...  # 新增：结构化输出
+
+    def count_tokens(self, text: str) -> int: ...
+```
+
+---
+
+## 12. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **统一协议** | `Message` / `ToolCall` / `LLMResponse` / `StreamChunk` 内部标准对象 |
+| **即插即用** | ABC + Factory + Registry，新增 provider = 1 个文件 |
+| **FC 适配** | 各 provider 自行转换 ↔ OpenAI format，Agent 侧只认一种格式 |
+| **流式统一** | `AsyncIterator[StreamChunk]`，SSE / Server-Sent Events / 自定义协议均可适配 |
+| **故障降级** | `FailoverLLM` 装饰器模式，配置 `fallback_providers` 链 |
+| **Token 估算** | 抽象 `count_tokens()`，各 provider 用最优方式实现 |
+| **热更新友好** | `create_llm()` 随时重建实例，ConfigManager 回调触发切换 |
+| **结构化输出** | `generate_structured()` 原生支持 JSON mode / function calling |

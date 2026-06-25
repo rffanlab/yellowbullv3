@@ -3,6 +3,17 @@
 from llm.base import BaseLLM
 
 
+def _resolve_config(config: dict) -> dict:
+    """Merge user config with defaults from LLMProviderConfig (single source of truth)."""
+    from config.settings import LLMProviderConfig
+
+    # Defaults from Pydantic model — the only place defaults live
+    defaults = LLMProviderConfig().model_dump()
+    # User config overrides; skip None so explicit empty strings still work
+    merged = {**defaults, **{k: v for k, v in config.items() if v is not None}}
+    return merged
+
+
 def create_llm(provider: str, config: dict) -> BaseLLM:
     """Create an LLM instance by provider name.
 
@@ -20,14 +31,7 @@ def create_llm(provider: str, config: dict) -> BaseLLM:
     if hasattr(config, "model_dump"):
         config = config.model_dump()
 
-    kwargs = {
-        "api_key": config.get("api_key", ""),
-        "base_url": config.get("base_url"),
-        "model": config.get("model", "gpt-4o-mini"),
-        "temperature": config.get("temperature", 0.7),
-        "max_tokens": config.get("max_tokens", 4096),
-        "timeout": config.get("timeout", 60.0),
-    }
+    kwargs = _resolve_config(config)
 
     if provider == "openai":
         from llm.openai_provider import OpenAILLM

@@ -8,6 +8,7 @@ from config.settings import Settings
 from core.context_builder import ContextBuilder
 from core.logging_setup import get_logger
 from core.session_manager import SessionManager
+from core.tool_executor import ExecutionResult, ExecutionStatus, ToolCallRequest, ToolExecutor
 from llm.base import BaseLLM
 from models.message import Message, MessageRole
 from models.session import Session
@@ -41,6 +42,17 @@ class Agent:
         self.session_manager = SessionManager()
         self.context_builder = ContextBuilder(settings.agent.system_prompt)
 
+        # Initialize tool executor from config
+        tc = settings.agent.tools
+        self.tool_executor = ToolExecutor(
+            registry=ToolRegistry(),
+            default_timeout=tc.tool_timeout_seconds,
+            max_retries=settings.agent.tool_retry_limit,
+            retry_backoff_factor=tc.retry_backoff_factor,
+            parallel=True,
+            enable_cache=tc.enable_cache,
+        )
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """Main entry point: process user request with tool calling loop."""
         session = self._get_or_create_session(request)
@@ -57,7 +69,7 @@ class Agent:
         )
         session.add_message(user_msg)
 
-        tool_results_log: list[dict] = []
+        tool_results_log: list[ExecutionResult] = []
 
         # Main loop: LLM -> tools -> LLM until final answer
         max_depth = self.settings.agent.max_chain_depth
@@ -101,25 +113,45 @@ class Agent:
             )
             session.add_message(assistant_msg)
 
-            # Execute tools in parallel
-            results = await self._execute_tools(response.tool_calls, session)
-            tool_results_log.extend(results)
+            # Execute tools via ToolExecutor (parallel by default)
+            requests = self._build_tool_requests(response.tool_calls)
+            batch_result = await self.tool_executor.execute_batch(requests)
+            tool_results_log.extend(batch_result.results)
 
             # Add tool results back to context for next iteration
-            for tr in results:
+            for idx, tc in enumerate(response.tool_calls):
+                exec_result = batch_result.results[idx] if idx < len(batch_result.results) else None
+                content = exec_result.content if exec_result else "工具执行结果不可用"
                 tool_msg = Message(
                     id=str(uuid.uuid4()),
                     role=MessageRole.TOOL,
-                    content=tr["content"],
-                    tool_call_id=tr["tool_call_id"],
+                    content=content,
+                    tool_call_id=tc.get("id", ""),
                 )
                 session.add_message(tool_msg)
 
-        # Exceeded max depth — return fallback response
+        # Exceeded max depth — summarize what was accomplished so far
         logger.warning("Max chain depth exceeded", extra={
             "session_id": session.session_id,
         })
-        fallback = "抱歉，任务处理步骤过多，请简化您的请求。"
+
+        # Collect tool results that were successful for a summary
+        success_results = [r for r in tool_results_log if r.status == ExecutionStatus.SUCCESS]
+        failed_results = [r for r in tool_results_log if r.status != ExecutionStatus.SUCCESS]
+
+        parts = []
+        if success_results:
+            done = [f"- {r.tool_name}: {r.content[:100]}" for r in success_results]
+            parts.append("已完成的操作：\n" + "\n".join(done))
+        if failed_results:
+            errors = [f"- {r.tool_name}: {r.error or 'unknown'}" for r in failed_results]
+            parts.append("失败的操作：\n" + "\n".join(errors))
+
+        fallback = "任务处理已达到最大步骤限制。"
+        if parts:
+            fallback += "\n\n" + "\n\n".join(parts)
+        fallback += "\n\n请继续对话让我完成剩余部分，或分步提交子任务。"
+
         session.add_message(Message(
             id=str(uuid.uuid4()),
             role=MessageRole.ASSISTANT,
@@ -127,51 +159,21 @@ class Agent:
         ))
         return ChatResponse(content=fallback, session_id=session.session_id)
 
-    async def _execute_tools(self, tool_calls: list[dict], session: Session) -> list[dict]:
-        """Execute multiple tool calls in parallel."""
-        import asyncio
-
+    def _build_tool_requests(self, tool_calls: list[dict]) -> list[ToolCallRequest]:
+        """Convert LLM tool call dicts to ToolCallRequest objects."""
         max_calls = self.settings.agent.max_tool_calls_per_turn
-        tasks = [self._run_single_tool(tc) for tc in tool_calls[:max_calls]]
-        return await asyncio.gather(*tasks)
-
-    async def _run_single_tool(self, tool_call: dict) -> dict:
-        """Execute a single tool call with retry logic."""
-        func_name = tool_call["function"]["name"]
-        try:
-            func_args = json.loads(tool_call["function"]["arguments"])
-        except (json.JSONDecodeError, KeyError):
-            return {
-                "tool_call_id": tool_call.get("id", ""),
-                "content": f"工具 '{func_name}' 参数解析失败",
-            }
-
-        tool = ToolRegistry.get(func_name)
-        if not tool:
-            return {
-                "tool_call_id": tool_call.get("id", ""),
-                "content": f"未知工具: {func_name}",
-            }
-
-        # Retry loop
-        retry_limit = self.settings.agent.tool_retry_limit
-        for attempt in range(retry_limit):
-            result = await tool.execute(**func_args)
-            if result.success:
-                return {
-                    "tool_call_id": tool_call.get("id", ""),
-                    "content": result.content,
-                }
-            logger.warning(
-                f"Tool '{func_name}' attempt {attempt + 1} failed: {result.content}",
-                extra={"session_id": None},
-            )
-
-        # All retries exhausted — return last error
-        return {
-            "tool_call_id": tool_call.get("id", ""),
-            "content": f"工具 '{func_name}' 执行失败: {result.content}",
-        }
+        requests = []
+        for tc in tool_calls[:max_calls]:
+            func_name = tc["function"]["name"]
+            try:
+                func_args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, KeyError):
+                func_args = {}
+            requests.append(ToolCallRequest(
+                tool_name=func_name,
+                arguments=func_args,
+            ))
+        return requests
 
     def _get_or_create_session(self, request: ChatRequest) -> Session:
         if request.session_id:

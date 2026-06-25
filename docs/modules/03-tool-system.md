@@ -820,3 +820,520 @@ await registry.register(EmailTool(), enabled=True)
 | **错误隔离** | `execute_with_guard()` 统一超时 + 异常捕获，返回结构化错误 |
 | **生命周期管理** | `on_enable/on_disable` 钩子，工具可管理连接池等资源 |
 | **安全执行** | Calculator 用 AST 白名单，WebSearch 用 httpx timeout |
+
+---
+
+## 10. 多模态工具支持
+
+### 10.1. 设计目标
+
+扩展工具系统以支持多模态输入/输出：
+- **图像输入**：截图分析、OCR、视觉问答
+- **音频输入**：语音转文字、音频分析
+- **文件输入**：文档解析、代码审查
+
+### 10.2. 协议扩展 `tools/multimodal_protocol.py`
+
+```python
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class MediaType(str, Enum):
+    IMAGE = "image"           # 图片（base64 / URL）
+    AUDIO = "audio"           # 音频
+    VIDEO = "video"           # 视频
+    DOCUMENT = "document"     # 文档（PDF、Word 等）
+    CODE_FILE = "code_file"   # 代码文件
+
+
+@dataclass(frozen=True)
+class MultimodalContent:
+    """多模态内容"""
+    media_type: MediaType       # 媒体类型
+    data: str                   # base64 编码数据或 URL
+    mime_type: str | None = None  # MIME 类型
+    file_name: str | None = None  # 原始文件名
+
+
+@dataclass(frozen=True)
+class MultimodalToolInput:
+    """多模态工具输入"""
+    text: str                           # 文本描述（可选）
+    contents: list[MultimodalContent] = field(default_factory=list)  # 媒体内容列表
+
+
+@dataclass(frozen=True)
+class MultimodalToolOutput:
+    """多模态工具输出"""
+    text: str = ""                      # 文本结果
+    media: MultimodalContent | None = None  # 媒体结果（如生成的图片）
+```
+
+### 10.3. 图像分析工具 `tools/image_analysis.py`
+
+```python
+from tools.base import BaseTool, ToolInput, ToolOutput, ToolSchema
+
+
+class ImageAnalysisTool(BaseTool):
+    """
+    图像分析工具。
+
+    支持：
+    - OCR 文字识别
+    - 图像描述生成
+    - 截图代码审查
+    """
+
+    name = "image_analysis"
+    description = "分析图片内容，包括 OCR、描述生成等"
+
+    def _build_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image_url": {"type": "string", "description": "图片 URL"},
+                    "operation": {
+                        "type": "string",
+                        "enum": ["ocr", "describe", "code_review"],
+                        "description": "分析操作类型",
+                    },
+                },
+                "required": ["image_url", "operation"],
+            },
+        )
+
+    async def execute(self, arguments: dict[str, Any]) -> ToolOutput:
+        image_url = arguments["image_url"]
+        operation = arguments["operation"]
+
+        if operation == "ocr":
+            return await self._perform_ocr(image_url)
+        elif operation == "describe":
+            return await self._describe_image(image_url)
+        elif operation == "code_review":
+            return await self._review_code_screenshot(image_url)
+        else:
+            return ToolOutput(error=f"Unknown operation: {operation}")
+
+    async def _perform_ocr(self, image_url: str) -> ToolOutput:
+        """OCR 文字识别"""
+        # TODO: 集成 OCR 引擎（如 PaddleOCR、Tesseract）
+        return ToolOutput(text="[OCR result placeholder]")
+
+    async def _describe_image(self, image_url: str) -> ToolOutput:
+        """图像描述生成（使用多模态 LLM）"""
+        # TODO: 调用支持视觉输入的 LLM
+        return ToolOutput(text="[Image description placeholder]")
+
+    async def _review_code_screenshot(self, image_url: str) -> ToolOutput:
+        """截图代码审查"""
+        # TODO: OCR + 代码分析
+        return ToolOutput(text="[Code review from screenshot placeholder]")
+```
+
+---
+
+## 11. 流式工具结果
+
+### 11.1. 设计目标
+
+对于耗时较长的工具调用（如大文件处理、复杂搜索），支持流式返回中间结果，提升用户体验。
+
+### 11.2. 协议扩展 `tools/streaming.py`
+
+```python
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class StreamEventType(str, Enum):
+    CHUNK = "chunk"             # 数据块
+    PROGRESS = "progress"       # 进度更新
+    COMPLETE = "complete"       # 完成信号
+    ERROR = "error"             # 错误信号
+
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """流式事件"""
+    event_type: StreamEventType   # 事件类型
+    data: str = ""                # 数据内容
+    progress_percent: float = 0.0  # 进度百分比 [0, 100]
+    metadata: dict[str, Any] = field(default_factory=dict)  # 额外元数据
+
+
+class StreamingToolOutput(ToolOutput):
+    """流式工具输出"""
+
+    def __init__(self, events=None, **kwargs):
+        super().__init__(**kwargs)
+        self._events = iter(events or [])
+
+    async def stream(self):
+        """异步迭代器，逐个产出事件"""
+        for event in self._events:
+            yield event
+        yield StreamEvent(event_type=StreamEventType.COMPLETE)
+```
+
+### 11.3. Agent Core 集成
+
+在 `agent/core.py` 的工具执行层增加流式支持：
+
+```python
+async def execute_tool_streaming(self, tool_call: ToolCall):
+    """执行工具并流式返回结果"""
+    result = await self.tool_registry.execute(tool_call)
+
+    if isinstance(result, StreamingToolOutput):
+        async for event in result.stream():
+            yield event
+    else:
+        # 非流式结果包装为单次事件
+        yield StreamEvent(
+            event_type=StreamEventType.COMPLETE,
+            data=result.text,
+        )
+```
+
+---
+
+## 12. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **统一协议** | `ToolInput` / `ToolOutput` / `ToolSchema` 内部标准对象 |
+| **即插即用** | ABC + Registry，新增工具 = 1 个文件 |
+| **JSON Schema 自动生成** | `_build_schema()` → `to_json_schema()` → LLM tool definition |
+| **热加载** | ConfigManager 回调 → `reload_all()` → 动态启停/刷新配置 |
+| **错误隔离** | `execute_with_guard()` 统一超时 + 异常捕获，返回结构化错误 |
+| **生命周期管理** | `on_enable/on_disable` 钩子，工具可管理连接池等资源 |
+| **安全执行** | Calculator 用 AST 白名单，WebSearch 用 httpx timeout |
+| **多模态支持** | `MultimodalContent` / `ImageAnalysisTool` 扩展协议 |
+| **流式结果** | `StreamingToolOutput` + `StreamEvent` 异步迭代器 |
+
+---
+
+## 13. A2A 工具集成
+
+### 13.1. 设计目标
+
+在工具系统中原生支持 A2A（Agent-to-Agent）协议，使工具能够作为子代理被调度：
+- **A2A 工具包装**：将远程 agent 暴露为本地可调用的工具
+- **任务委托**：主 agent 通过工具调用将子任务委托给专业 agent
+- **状态跟踪**：支持任务的创建、查询、取消等全生命周期管理
+
+### 13.2. A2A 工具基类 `tools/a2a_tool.py`
+
+```python
+import asyncio
+import logging
+from typing import Any
+
+import httpx
+
+from tools.base import BaseTool
+from tools.protocol import ToolSchema, ToolInput, ToolOutput
+
+logger = logging.getLogger(__name__)
+
+
+class A2ABaseTool(BaseTool):
+    """
+    A2A 工具基类。
+
+    将远程 agent 的 A2A API 封装为标准工具接口，
+    主 agent 可通过工具调用与子 agent 交互。
+    """
+
+    def __init__(self, agent_card_url: str, timeout: float = 120.0):
+        self._agent_card_url = agent_card_url
+        self._timeout = timeout
+        self._agent_card: dict[str, Any] | None = None
+        self._client = httpx.AsyncClient(timeout=timeout)
+
+    async def on_enable(self):
+        """启用时加载 Agent Card"""
+        try:
+            resp = await self._client.get(self._agent_card_url)
+            self._agent_card = resp.json()
+            logger.info(
+                f"A2A agent loaded: {self._agent_card.get('name', 'unknown')} "
+                f"({self._agent_card.get('version', '?')})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to load Agent Card from {self._agent_card_url}: {e}")
+
+    async def on_disable(self):
+        await self._client.aclose()
+
+    @property
+    def agent_capabilities(self) -> list[str]:
+        if self._agent_card:
+            return self._agent_card.get("capabilities", [])
+        return []
+
+    @property
+    def default_timeout(self) -> float:
+        card_timeout = (self._agent_card or {}).get("defaultTimeout", 60_000)
+        return card_timeout / 1000.0  # ms → seconds
+```
+
+### 13.3. A2A 任务提交工具 `tools/a2a_submit_task.py`
+
+```python
+from tools.a2a_tool import A2ABaseTool
+
+
+class A2ASubmitTaskTool(A2ABaseTool):
+    """向远程 agent 提交任务"""
+
+    name = "a2a_submit_task"
+    description = (
+        "Submit a task to a specialized remote agent. "
+        "Returns a task ID for subsequent status polling."
+    )
+
+    def _build_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The task description or question for the remote agent.",
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Optional additional context (files, preferences, etc.).",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+
+    async def execute(self, input: ToolInput) -> ToolOutput:
+        query = input.arguments.get("query", "")
+        metadata = input.arguments.get("metadata", {})
+
+        try:
+            payload = {
+                "kind": "submit",
+                "message": {
+                    "kind": "user",
+                    "content": {"kind": "text", "text": query},
+                    "metadata": metadata,
+                },
+            }
+
+            card = self._agent_card or {}
+            push_url = card.get("defaultPushUrl")
+            if push_url:
+                payload["pushNotification"] = {
+                    "token": push_url,
+                    "acceptedFormats": ["text"],
+                }
+
+            resp = await self._client.post(
+                f"{self._get_base_url()}/tasks", json=payload
+            )
+            task_data = resp.json()
+
+            return ToolOutput.ok(
+                text=f"Task submitted successfully.",
+                metadata={
+                    "taskId": task_data.get("id"),
+                    "status": task_data.get("status", "submitted"),
+                },
+            )
+        except Exception as e:
+            logger.error(f"A2A task submission failed: {e}")
+            return ToolOutput.fail(str(e))
+
+    def _get_base_url(self) -> str:
+        url = self._agent_card_url.rstrip("/")
+        if "/.well-known/agent.json" in url:
+            url = url.replace("/.well-known/agent.json", "")
+        return url
+```
+
+### 13.4. A2A 任务状态查询工具 `tools/a2a_task_status.py`
+
+```python
+from tools.a2a_tool import A2ABaseTool
+
+
+class A2ATaskStatusTool(A2ABaseTool):
+    """查询远程 agent 任务状态"""
+
+    name = "a2a_task_status"
+    description = (
+        "Get the status and result of a previously submitted task. "
+        "Returns completed results or intermediate status."
+    )
+
+    def _build_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID returned from a2a_submit_task.",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        )
+
+    async def execute(self, input: ToolInput) -> ToolOutput:
+        task_id = input.arguments.get("task_id", "")
+
+        try:
+            resp = await self._client.get(
+                f"{self._get_base_url()}/tasks/{task_id}"
+            )
+            task_data = resp.json()
+            status = task_data.get("status", "unknown")
+
+            # 提取结果内容
+            result_text = ""
+            if status == "completed" and "result" in task_data:
+                result_text = self._extract_result(task_data["result"])
+
+            return ToolOutput.ok(
+                text=result_text or f"Task status: {status}",
+                metadata={
+                    "taskId": task_id,
+                    "status": status,
+                    "taskData": task_data,
+                },
+            )
+        except Exception as e:
+            logger.error(f"A2A task status query failed: {e}")
+            return ToolOutput.fail(str(e))
+
+    @staticmethod
+    def _extract_result(result: dict) -> str:
+        """从 A2A 结果中提取文本内容"""
+        if isinstance(result, list):
+            parts = []
+            for item in result:
+                if isinstance(item, dict):
+                    if item.get("kind") == "text":
+                        parts.append(item.get("text", ""))
+                    elif item.get("kind") == "data":
+                        parts.append(str(item.get("data", "")))
+            return "\n".join(parts)
+        elif isinstance(result, dict):
+            if result.get("kind") == "text":
+                return result.get("text", "")
+        return str(result)
+
+    def _get_base_url(self) -> str:
+        url = self._agent_card_url.rstrip("/")
+        if "/.well-known/agent.json" in url:
+            url = url.replace("/.well-known/agent.json", "")
+        return url
+```
+
+### 13.5. A2A 工具注册示例 `tools/a2a_registry.py`
+
+```python
+from tools.a2a_submit_task import A2ASubmitTaskTool
+from tools.a2a_task_status import A2ATaskStatusTool
+
+
+async def register_a2a_tools(registry, agent_configs: list[dict]):
+    """
+    批量注册 A2A 工具。
+
+    Args:
+        registry: ToolRegistry 实例
+        agent_configs: YAML 中 a2a.agents[] 配置列表
+
+            Example YAML:
+                a2a:
+                  agents:
+                    - name: code_reviewer
+                      card_url: http://code-agent:8080/.well-known/agent.json
+                      enabled: true
+    """
+    for cfg in agent_configs:
+        agent_name = cfg.get("name", "unknown")
+        card_url = cfg.get("card_url")
+
+        if not card_url:
+            continue
+
+        # 为每个远程 agent 创建命名空间化的工具
+        submit_tool = A2ASubmitTaskTool(
+            agent_card_url=card_url,
+            timeout=cfg.get("timeout", 120.0),
+        )
+        status_tool = A2ATaskStatusTool(
+            agent_card_url=card_url,
+            timeout=30.0,
+        )
+
+        # 命名空间化工具名，避免冲突
+        submit_tool.name = f"a2a_{agent_name}_submit"
+        submit_tool.description = (
+            f"Submit a task to the '{agent_name}' remote agent."
+        )
+        status_tool.name = f"a2a_{agent_name}_status"
+        status_tool.description = (
+            f"Get status of a task submitted to '{agent_name}'."
+        )
+
+        await registry.register(submit_tool, enabled=cfg.get("enabled", True))
+        await registry.register(status_tool, enabled=cfg.get("enabled", True))
+```
+
+### 13.6. A2A 交互时序图
+
+```
+主 Agent                    ToolRegistry              远程 Agent (A2A)
+   │                            │                           │
+   │── LLM 决定委托任务 ─────────>│                           │
+   │                            │── POST /tasks ────────────>│
+   │                            │   {query: "..."}           │
+   │                            │                           │
+   │                            │<── 200 {id, status} ──────│
+   │<─ ToolOutput.ok(id) ──────│                           │
+   │                            │                           │
+   │         (异步处理中...)      │                           │
+   │                            │                           │
+   │── LLM 轮询结果 ────────────>│                           │
+   │                            │── GET /tasks/{id} ───────>│
+   │                            │                           │
+   │                            │<── 200 {status, result} ──│
+   │<─ ToolOutput.ok(result) ──│                           │
+```
+
+---
+
+## 14. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **统一协议** | `ToolInput` / `ToolOutput` / `ToolSchema` 内部标准对象 |
+| **即插即用** | ABC + Registry，新增工具 = 1 个文件 |
+| **JSON Schema 自动生成** | `_build_schema()` → `to_json_schema()` → LLM tool definition |
+| **热加载** | ConfigManager 回调 → `reload_all()` → 动态启停/刷新配置 |
+| **错误隔离** | `execute_with_guard()` 统一超时 + 异常捕获，返回结构化错误 |
+| **生命周期管理** | `on_enable/on_disable` 钩子，工具可管理连接池等资源 |
+| **安全执行** | Calculator 用 AST 白名单，WebSearch 用 httpx timeout |
+| **多模态支持** | `MultimodalContent` / `ImageAnalysisTool` 扩展协议 |
+| **流式结果** | `StreamingToolOutput` + `StreamEvent` 异步迭代器 |
+| **A2A 集成** | `A2ABaseTool` 基类，命名空间化工具名，全生命周期管理 |

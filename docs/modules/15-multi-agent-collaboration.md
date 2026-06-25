@@ -678,3 +678,189 @@ multi_agent:
 | **专用模型** | 每个 Agent 可配置独立 LLM（成本优化） |
 | **工具隔离** | 每个 Agent 仅拥有指定工具集 |
 | **结果聚合** | Supervisor LLM 汇总多 Agent 输出 |
+| **A2A 协议** | `AgentCommunicationBus` 支持请求/响应、委托、协商三种模式 |
+
+---
+
+## 9. Agent-to-Agent 通信协议
+
+### 9.1. 设计目标
+
+定义 Agent 之间通信的标准协议：
+- **请求/响应模式**：同步调用另一个 Agent 的能力
+- **委托模式**：将子任务完全委托给专家 Agent
+- **协商模式**：多个 Agent 就某个决策进行协商
+
+### 9.2. 协议设计 `multiagent/a2a_protocol.py`
+
+```python
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class A2AMessageType(str, Enum):
+    REQUEST = "request"           # 请求
+    RESPONSE = "response"         # 响应
+    DELEGATE = "delegate"         # 委托
+    RESULT = "result"             # 结果返回
+    NEGOTIATE = "negotiate"       # 协商提议
+    COUNTER_PROPOSAL = "counter_proposal"  # 反提议
+
+
+@dataclass(frozen=True)
+class A2AMessage:
+    """Agent-to-Agent 消息"""
+    message_type: A2AMessageType   # 消息类型
+    sender_id: str                 # 发送方 Agent ID
+    receiver_id: str              # 接收方 Agent ID
+    correlation_id: str           # 关联 ID（用于追踪请求链）
+    payload: dict[str, Any]       # 负载数据
+    timeout_ms: int = 30000       # 超时时间（毫秒）
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class A2ARequest(A2AMessage):
+    """Agent 请求"""
+    task_description: str         # 任务描述
+    context: dict[str, Any] = field(default_factory=dict)  # 上下文信息
+
+
+@dataclass(frozen=True)
+class A2AResponse(A2AMessage):
+    """Agent 响应"""
+    success: bool                 # 是否成功
+    result_data: Any = None       # 结果数据
+    error_message: str | None = None  # 错误信息
+
+
+@dataclass(frozen=True)
+class A2ANegotiation(A2AMessage):
+    """协商消息"""
+    proposal: dict[str, Any]      # 提议内容
+    reasoning: str                # 理由说明
+    round_number: int = 1         # 协商轮次
+
+
+class AgentCommunicationBus:
+    """Agent 通信总线"""
+
+    def __init__(self):
+        self._agents: dict[str, Any] = {}  # agent_id -> agent instance
+        self._pending_requests: dict[str, asyncio.Future] = {}
+
+    def register_agent(self, agent_id: str, agent) -> None:
+        """注册 Agent"""
+        self._agents[agent_id] = agent
+
+    async def send_request(
+        self,
+        sender_id: str,
+        receiver_id: str,
+        task_description: str,
+        context: dict[str, Any] | None = None,
+        timeout_ms: int = 30000,
+    ) -> A2AResponse:
+        """发送请求并等待响应"""
+        import asyncio
+        import uuid
+
+        correlation_id = str(uuid.uuid4())
+        request = A2ARequest(
+            message_type=A2AMessageType.REQUEST,
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            correlation_id=correlation_id,
+            payload={"context": context or {}},
+            timeout_ms=timeout_ms,
+            task_description=task_description,
+        )
+
+        # 创建 Future 等待响应
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending_requests[correlation_id] = future
+
+        try:
+            await self._agents[receiver_id].handle_a2a_message(request)
+            response = await asyncio.wait_for(future, timeout=timeout_ms / 1000)
+            return response
+
+        except asyncio.TimeoutError:
+            return A2AResponse(
+                message_type=A2AMessageType.RESPONSE,
+                sender_id=receiver_id,
+                receiver_id=sender_id,
+                correlation_id=correlation_id,
+                payload={},
+                success=False,
+                error_message=f"Request timed out after {timeout_ms}ms",
+            )
+
+    async def deliver_response(self, response: A2AResponse) -> None:
+        """投递响应到等待的 Future"""
+        future = self._pending_requests.pop(response.correlation_id, None)
+        if future and not future.done():
+            future.set_result(response)
+```
+
+### 9.3. Agent 侧集成 `multiagent/a2a_handler.py`
+
+```python
+class A2AHandler:
+    """Agent 侧的 A2A 消息处理器"""
+
+    def __init__(self, agent_id: str, comm_bus: AgentCommunicationBus):
+        self._agent_id = agent_id
+        self._comm_bus = comm_bus
+
+    async def handle_a2a_message(self, message: A2AMessage) -> None:
+        """处理来自其他 Agent 的消息"""
+        if message.message_type == A2AMessageType.REQUEST:
+            result = await self._process_request(message)
+            response = A2AResponse(
+                message_type=A2AMessageType.RESPONSE,
+                sender_id=self._agent_id,
+                receiver_id=message.sender_id,
+                correlation_id=message.correlation_id,
+                payload={"result_data": result},
+                success=True,
+            )
+            await self._comm_bus.deliver_response(response)
+
+        elif message.message_type == A2AMessageType.NEGOTIATE:
+            decision = await self._evaluate_proposal(message)
+            counter = A2ANegotiation(
+                message_type=A2AMessageType.COUNTER_PROPOSAL,
+                sender_id=self._agent_id,
+                receiver_id=message.sender_id,
+                correlation_id=message.correlation_id,
+                payload={"decision": decision},
+                proposal=decision.get("counter_proposal", {}),
+                reasoning=decision.get("reasoning", ""),
+                round_number=message.round_number + 1,
+            )
+            await self._comm_bus.send_message(counter)
+
+    async def _process_request(self, message: A2AMessage) -> Any:
+        """处理请求（由子类实现具体逻辑）"""
+        raise NotImplementedError
+
+    async def _evaluate_proposal(self, message: A2AMessage) -> dict[str, Any]:
+        """评估协商提议（由子类实现）"""
+        raise NotImplementedError
+```
+
+---
+
+## 10. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **Agent 注册** | AgentRegistry，支持动态注册/启用/禁用 |
+| **智能路由** | Supervisor LLM 分析意图 → JSON 决策 |
+| **协作模式** | single / chain / parallel 三种编排 |
+| **专用模型** | 每个 Agent 可配置独立 LLM（成本优化） |
+| **工具隔离** | 每个 Agent 仅拥有指定工具集 |
+| **结果聚合** | Supervisor LLM 汇总多 Agent 输出 |
+| **A2A 协议** | `AgentCommunicationBus` 支持请求/响应、委托、协商三种模式 |

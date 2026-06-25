@@ -379,3 +379,110 @@ async def run_sync(
 | **工具编排** | parallel tool calls → sequential execution → results back to LLM |
 | **错误恢复** | 结构化错误回注 conversation_history，LLM 自主决策 |
 | **Session 集成** | 每步操作都 append_message()，完整审计链 |
+
+---
+
+## 8. A2A 代理间通信集成
+
+### 8.1. 设计目标
+
+在 Agent Core 中集成 A2A（Agent-to-Agent）协议支持：
+- **任务委托**：主 agent 可将子任务委托给专业远程 agent
+- **结果聚合**：收集多个子 agent 的结果并综合处理
+- **降级策略**：A2A 不可用时自动回退到本地工具
+
+### 8.2. A2A 决策逻辑
+
+```python
+async def _should_delegate_a2a(self, tool_call: ToolCall) -> bool:
+    """判断是否应将任务委托给远程 agent"""
+    return tool_call.name.startswith("a2a_")
+```
+
+### 8.3. A2A 任务执行流程
+
+在主循环的工具执行阶段增加 A2A 分支：
+
+```python
+async def _execute_tool(self, tool_call: ToolCall) -> ToolOutput:
+    result = await self.tool_registry.execute(tool_call.name, tool_call.arguments)
+
+    # A2A 工具返回异步任务 ID，需要轮询等待结果
+    if tool_call.name.startswith("a2a_") and result.metadata:
+        task_id = result.metadata.get("taskId")
+        if task_id and result.metadata.get("status") in ("submitted", "working"):
+            result = await self._poll_a2a_task(
+                tool_call.name.replace("_submit", "_status"), task_id
+            )
+
+    return result
+
+
+async def _poll_a2a_task(self, status_tool_name: str, task_id: str, max_polls: int = 30) -> ToolOutput:
+    """轮询 A2A 任务结果"""
+    for attempt in range(max_polls):
+        result = await self.tool_registry.execute(status_tool_name, {"task_id": task_id})
+
+        status = (result.metadata or {}).get("status", "unknown")
+        if status == "completed":
+            return result
+        elif status == "failed" or status == "canceled":
+            return ToolOutput.fail(f"A2A task {task_id} ended with status: {status}")
+
+        await asyncio.sleep(1.0)  # 轮询间隔
+
+    return ToolOutput.fail(f"A2A task {task_id} timed out after {max_polls} polls")
+```
+
+### 8.4. A2A 降级策略
+
+当远程 agent 不可用时，Agent Core 自动回退：
+
+```python
+async def _execute_tool_with_fallback(self, tool_call: ToolCall) -> ToolOutput:
+    result = await self._execute_tool(tool_call)
+
+    if not result.is_ok and tool_call.name.startswith("a2a_"):
+        logger.warning(f"A2A tool failed: {tool_call.name}, attempting fallback")
+        # 尝试使用本地等效工具或生成提示性回复
+        return await self._local_fallback(tool_call)
+```
+
+---
+
+## 9. 结构化输出集成
+
+### 9.1. 设计目标
+
+Agent Core 能够利用 LLM 的结构化输出来优化决策流程：
+- **解析增强**：使用 `generate_structured()` 获取强类型响应
+- **工具选择优化**：通过 schema 约束提高 tool call 准确率
+- **中间格式标准化**：统一内部数据交换格式
+
+### 9.2. 结构化 LLM 调用
+
+```python
+async def _structured_llm_call(self, messages: list[Message], schema: dict) -> LLMResponse:
+    """使用结构化输出约束 LLM 响应"""
+    if hasattr(self.llm, "generate_structured"):
+        return await self.llm.generate_structured(
+            messages=[self._to_openai_msg(m) for m in messages],
+            response_format=schema,
+        )
+    # 降级到普通调用
+    return await self.chat(messages)
+```
+
+---
+
+## 10. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **主循环** | while True: LLM → parse → tools → retry（max rounds 保护） |
+| **流式输出** | SSE event stream，前端实时渲染 |
+| **工具编排** | parallel tool calls → sequential execution → results back to LLM |
+| **错误恢复** | 结构化错误回注 conversation_history，LLM 自主决策 |
+| **Session 集成** | 每步操作都 append_message()，完整审计链 |
+| **A2A 通信** | `a2a_*` 工具自动识别 → 轮询等待 → 降级本地处理 |
+| **结构化输出** | `generate_structured()` 优先调用，无支持时降级普通调用 |

@@ -40,12 +40,18 @@ class ToolRegistry:
 
     @classmethod
     def to_function_definitions(cls) -> list[dict[str, Any]]:
-        """Convert to LLM function calling format."""
+        """Convert to OpenAI-compatible function calling format.
+
+        Format: [{"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}]
+        """
         return [
             {
-                "name": t.info.name,
-                "description": t.info.description,
-                "parameters": t.info.parameters,
+                "type": "function",
+                "function": {
+                    "name": t.info.name,
+                    "description": t.info.description,
+                    "parameters": t.info.parameters,
+                },
             }
             for t in cls._tools.values()
         ]

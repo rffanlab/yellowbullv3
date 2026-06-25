@@ -571,3 +571,121 @@ Window: [5..10], total=3150 tokens, dropped=4 messages
 | **上下文裁剪** | 滑动窗口 + token 预算，从后向前累加 |
 | **Token 估算** | 字符启发式（生产可替换 tiktoken） |
 | **热加载** | YAML → max_messages/max_tokens 自动刷新 |
+
+---
+
+## 10. 跨会话记忆集成
+
+### 10.1. 设计目标
+
+Session Manager 与 Memory System 协同工作，实现跨会话的上下文延续：
+- **记忆注入**：新会话启动时从 MemorySystem 加载相关记忆
+- **记忆提取**：会话结束时将关键信息持久化到长期记忆
+- **隐私保护**：敏感会话不写入记忆
+
+### 10.2. 记忆注入流程
+
+```python
+async def _build_enhanced_context(
+    self, session_id: str, user_message: str
+) -> list[Message]:
+    """构建增强上下文（系统提示 + 记忆 + 历史消息）"""
+    messages = []
+
+    # 1. 注入系统提示
+    system_msg = Message(role="system", content=self._system_prompt)
+    messages.append(system_msg)
+
+    # 2. 从 MemorySystem 检索相关记忆
+    if self._memory_system is not None:
+        memory_context = await self._memory_system.get_relevant_memory(
+            user_message=user_message,
+            session_id=session_id,
+        )
+        if memory_context:
+            messages.append(Message(
+                role="system",
+                content=f"[Relevant Memory]\n{memory_context}\n[/Relevant Memory]",
+            ))
+
+    # 3. 追加会话历史（滑动窗口裁剪）
+    history = await self.get_window(session_id)
+    messages.extend(history)
+
+    return messages
+```
+
+### 10.3. 记忆提取流程
+
+```python
+async def _extract_memory(self, session_id: str):
+    """会话结束时提取关键信息到长期记忆"""
+    if self._memory_system is None:
+        return
+
+    # 检查会话是否标记为敏感（不写入记忆）
+    metadata = await self.get_metadata(session_id)
+    if metadata.get("is_sensitive", False):
+        logger.info(f"Skipping memory extraction for sensitive session {session_id}")
+        return
+
+    messages = await self.get_all_messages(session_id)
+    # 提取用户偏好、关键决策等信息
+    await self._memory_system.extract_and_save(
+        conversation=messages,
+        session_id=session_id,
+    )
+```
+
+---
+
+## 11. 会话级隐私控制
+
+### 11.1. 设计目标
+
+提供细粒度的隐私控制机制：
+- **敏感标记**：用户可标记会话为敏感，禁止记忆提取和日志记录
+- **数据过期**：自动清理超过保留期的会话数据
+- **审计追踪**：所有隐私相关操作均有审计日志
+
+### 11.2. 隐私标记 API
+
+```python
+async def set_sensitive(self, session_id: str, is_sensitive: bool):
+    """标记/取消标记敏感会话"""
+    metadata = await self.get_metadata(session_id)
+    old_value = metadata.get("is_sensitive", False)
+    metadata["is_sensitive"] = is_sensitive
+    await self._update_metadata(session_id, metadata)
+
+    if is_sensitive and not old_value:
+        logger.warning(f"Session {session_id} marked as sensitive - memory extraction disabled")
+```
+
+### 11.3. 数据过期清理
+
+```python
+async def cleanup_expired_sessions(self, retention_days: int = 90):
+    """清理超过保留期的会话"""
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    expired_ids = await self._get_expired_session_ids(cutoff)
+
+    for sid in expired_ids:
+        await self.delete_session(sid)
+        logger.info(f"Expired session cleaned up: {sid}")
+```
+
+---
+
+## 12. 更新后的设计总结
+
+| 特性 | 实现方式 |
+|------|---------|
+| **持久化** | SQLite WAL mode，append-only 消息写入 |
+| **内存缓存** | dict[str, Session] 热路径零 IO |
+| **并发安全** | per-session asyncio.Lock，不同 session 并行 |
+| **上下文裁剪** | 滑动窗口 + token 预算，从后向前累加 |
+| **Token 估算** | 字符启发式（生产可替换 tiktoken） |
+| **热加载** | YAML → max_messages/max_tokens 自动刷新 |
+| **跨会话记忆** | MemorySystem 注入/提取，敏感会话跳过 |
+| **隐私控制** | is_sensitive 标记 + 数据过期清理 |

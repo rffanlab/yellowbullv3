@@ -1,502 +1,681 @@
-# 安全与治理（Security & Governance）详细设计
+# 安全与治理详细设计（Security & Governance）
 
 ## 1. 职责边界
 
-| 支柱 | 说明 |
+| 领域 | 说明 |
 |------|------|
-| **API Key 认证** | X-API-Key header 验证，支持多 key 管理 |
-| **RBAC 权限控制** | 用户/角色/资源三级权限模型 |
-| **内容过滤** | 输入输出敏感内容检测与拦截 |
-| **Prompt 注入防护** | 系统提示隔离、输入清洗 |
-| **速率限制** | 按 API key / IP 限流 |
-| **审计日志** | 操作记录 + 合规报告 |
+| **认证授权** | API Key、JWT Token、RBAC 角色权限控制 |
+| **内容过滤** | 输入/输出双向安全检查，敏感词 + AI 审核 |
+| **Prompt 注入防护** | 检测并阻断恶意 prompt 攻击 |
+| **审计日志** | 所有操作的不可篡改记录 |
+| **速率限制** | API 调用频率控制，防滥用 |
 
 ---
 
-## 2. API Key 认证 `security/auth.py`
+## 2. RBAC 权限系统 `security/rbac.py`
+
+```python
+"""
+基于角色的访问控制（RBAC）。
+
+角色层级：
+    admin → manager → user → viewer
+
+权限矩阵：
+| 操作              | admin | manager | user | viewer |
+|-------------------|-------|---------|------|--------|
+| create_workspace  | ✓     | -       | -    | -      |
+| manage_users      | ✓     | ✓       | -    | -      |
+| create_agent      | ✓     | ✓       | ✓    | -      |
+| run_agent         | ✓     | ✓       | ✓    | ✓      |
+| view_audit_log    | ✓     | ✓       | -    | -      |
+| manage_billing    | ✓     | -       | -    | -      |
+"""
+
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class Role(str, Enum):
+    ADMIN = "admin"
+    MANAGER = "manager"
+    USER = "user"
+    VIEWER = "viewer"
+
+
+class Permission(str, Enum):
+    CREATE_WORKSPACE = "workspace:create"
+    DELETE_WORKSPACE = "workspace:delete"
+    MANAGE_USERS = "users:manage"
+    CREATE_AGENT = "agent:create"
+    UPDATE_AGENT = "agent:update"
+    DELETE_AGENT = "agent:delete"
+    RUN_AGENT = "agent:run"
+    VIEW_AUDIT_LOG = "audit:view"
+    MANAGE_BILLING = "billing:manage"
+    VIEW_BILLING = "billing:view"
+    MANAGE_TOOLS = "tools:manage"
+    USE_TOOL = "tools:use"
+
+
+# 角色 → 权限映射
+ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
+    Role.ADMIN: {p for p in Permission},
+    Role.MANAGER: {
+        Permission.CREATE_AGENT, Permission.UPDATE_AGENT, Permission.DELETE_AGENT,
+        Permission.RUN_AGENT, Permission.MANAGE_USERS, Permission.VIEW_AUDIT_LOG,
+        Permission.VIEW_BILLING, Permission.USE_TOOL,
+    },
+    Role.USER: {
+        Permission.CREATE_AGENT, Permission.UPDATE_AGENT,
+        Permission.RUN_AGENT, Permission.USE_TOOL, Permission.VIEW_BILLING,
+    },
+    Role.VIEWER: {
+        Permission.RUN_AGENT,
+    },
+}
+
+
+@dataclass
+class User:
+    user_id: str
+    username: str
+    role: Role = Role.USER
+    workspace_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ResourceContext:
+    """资源上下文（用于权限检查）"""
+    resource_type: str       # "agent" | "workspace" | "tool" | ...
+    resource_id: str         # 资源 ID
+    workspace_id: str | None = None  # 所属工作空间
+
+
+class RBACGuard:
+    """RBAC 权限守卫"""
+
+    def __init__(self):
+        self._users: dict[str, User] = {}
+
+    def register_user(self, user: User):
+        self._users[user.user_id] = user
+
+    def check_permission(
+        self, user_id: str, permission: Permission, context: ResourceContext | None = None
+    ) -> bool:
+        """检查用户是否有某项权限"""
+        user = self._users.get(user_id)
+        if not user:
+            return False
+
+        user_permissions = ROLE_PERMISSIONS.get(user.role, set())
+        if permission not in user_permissions:
+            logger.warning(
+                f"Permission denied: user={user.username} role={user.role} "
+                f"requested={permission.value}"
+            )
+            return False
+
+        # 工作空间隔离检查
+        if context and context.workspace_id:
+            if context.workspace_id not in user.workspace_ids:
+                logger.warning(
+                    f"Workspace access denied: user={user.username} "
+                    f"workspace={context.workspace_id}"
+                )
+                return False
+
+        return True
+
+    def require_permission(
+        self, user_id: str, permission: Permission, context: ResourceContext | None = None
+    ):
+        """权限检查失败时抛出异常"""
+        if not self.check_permission(user_id, permission, context):
+            raise PermissionError(
+                f"User '{user_id}' lacks permission '{permission.value}'"
+            )
+
+    def get_user_permissions(self, user_id: str) -> set[Permission]:
+        """获取用户的所有权限"""
+        user = self._users.get(user_id)
+        return ROLE_PERMISSIONS.get(user.role, set()) if user else set()
+
+
+class WorkspaceGuard:
+    """工作空间隔离守卫"""
+
+    def __init__(self):
+        # workspace_id → set of user_ids
+        self._memberships: dict[str, set[str]] = {}
+
+    def add_member(self, workspace_id: str, user_id: str):
+        if workspace_id not in self._memberships:
+            self._memberships[workspace_id] = set()
+        self._memberships[workspace_id].add(user_id)
+
+    def can_access(self, user_id: str, workspace_id: str) -> bool:
+        return user_id in self._memberships.get(workspace_id, set())
+
+    def list_workspaces(self, user_id: str) -> list[str]:
+        """列出用户有权限访问的工作空间"""
+        return [
+            ws_id for ws_id, members in self._memberships.items()
+            if user_id in members
+        ]
+```
+
+---
+
+## 3. API Key 认证 `security/auth.py`
 
 ```python
 """
 API Key 认证中间件。
 
 支持：
-- X-API-Key header 验证
-- 多 key 管理（不同 key 对应不同权限级别）
-- Key 轮换与过期控制
+- Header: X-API-Key
+- Query param: ?api_key=...
+- Bearer Token (JWT)
 """
 
 import hashlib
 import hmac
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
-class APIKey:
-    """API Key 实体"""
-
-    def __init__(
-        self, name: str, secret: str, roles: list[str] = None,
-        expires_at: datetime = None, rate_limit_rpm: int = 60,
-    ):
-        self.name = name
-        self.secret_hash = hashlib.sha256(secret.encode()).hexdigest()
-        self.roles = roles or ["user"]
-        self.expires_at = expires_at
-        self.rate_limit_rpm = rate_limit_rpm
-        self.created_at = datetime.now(timezone.utc)
-        self.last_used_at: Optional[datetime] = None
-
-    def verify(self, secret: str) -> bool:
-        """验证 API Key"""
-        return hmac.compare_digest(
-            hashlib.sha256(secret.encode()).hexdigest(),
-            self.secret_hash,
-        )
-
-    @property
-    def is_expired(self) -> bool:
-        if not self.expires_at:
-            return False
-        return datetime.now(timezone.utc) > self.expires_at
+@dataclass
+class APIKeyRecord:
+    """API Key 记录（存储时只存哈希）"""
+    key_id: str
+    key_hash: str           # SHA-256 hash of the actual key
+    user_id: str
+    workspace_id: str | None
+    permissions: list[str]  # 权限列表
+    rate_limit_rpm: int     # 每分钟请求数限制
+    created_at: float
+    expires_at: float | None  # 过期时间（None = 永不过期）
+    is_active: bool = True
 
 
 class APIKeyStore:
-    """API Key 存储（生产环境应使用数据库）"""
+    """API Key 存储"""
 
     def __init__(self):
-        self._keys: dict[str, APIKey] = {}
+        self._keys: dict[str, APIKeyRecord] = {}  # key_id → record
 
-    def add_key(self, key: APIKey):
-        self._keys[key.secret_hash] = key
+    def add_key(self, record: APIKeyRecord):
+        self._keys[record.key_id] = record
 
-    def verify(self, secret: str) -> Optional[APIKey]:
-        """验证并返回 API Key 信息"""
-        key_hash = hashlib.sha256(secret.encode()).hexdigest()
-        api_key = self._keys.get(key_hash)
+    def verify(self, api_key: str) -> APIKeyRecord | None:
+        """验证 API Key（通过哈希比对）"""
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
-        if not api_key:
-            return None
-        if api_key.is_expired:
-            return None
-
-        api_key.last_used_at = datetime.now(timezone.utc)
-        return api_key
+        for record in self._keys.values():
+            if hmac.compare_digest(record.key_hash, key_hash):
+                return record
+        return None
 
 
-async def api_key_middleware(request, call_next):
-    """FastAPI middleware"""
-    from fastapi import HTTPException
+class JWTManager:
+    """JWT Token 管理"""
 
-    # 白名单路径（无需认证）
-    public_paths = ["/health", "/ready", "/metrics", "/docs", "/openapi.json"]
-    if any(request.url.path.startswith(p) for p in public_paths):
-        return await call_next(request)
+    def __init__(self, secret_key: str, algorithm: str = "HS256"):
+        self._secret = secret_key
+        self._algorithm = algorithm
 
-    api_key_header = request.headers.get("X-API-Key")
-    if not api_key_header:
-        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
-
-    key_store = get_api_key_store()  # 从依赖注入获取
-    api_key = key_store.verify(api_key_header)
-
-    if not api_key:
-        raise HTTPException(status_code=403, detail="Invalid or expired API key")
-
-    # 将认证信息注入 request state
-    request.state.api_key = api_key
-    return await call_next(request)
-
-
-def get_api_key_store() -> APIKeyStore:
-    """获取全局 API Key Store"""
-    import config.manager as cm
-    manager = cm.get_manager()
-    if not hasattr(manager, "_api_key_store"):
-        manager._api_key_store = APIKeyStore()
-        # 从配置加载 keys
-        for key_config in (manager.settings.security or {}).get("api_keys", []):
-            expires_at = None
-            if key_config.get("expires_at"):
-                expires_at = datetime.fromisoformat(key_config["expires_at"])
-
-            manager._api_key_store.add_key(APIKey(
-                name=key_config["name"],
-                secret=key_config["secret"],
-                roles=key_config.get("roles", ["user"]),
-                expires_at=expires_at,
-                rate_limit_rpm=key_config.get("rate_limit_rpm", 60),
-            ))
-    return manager._api_key_store
-```
-
----
-
-## 3. RBAC 权限控制 `security/rbac.py`
-
-```python
-"""
-RBAC（Role-Based Access Control）权限模型。
-
-角色层级：
-- admin: 所有权限，可管理用户和配置
-- developer: 可使用所有工具，可访问审计日志
-- user: 基础对话 + 有限工具集
-- viewer: 只读访问
-
-资源操作矩阵：
-| 资源          | admin | developer | user | viewer |
-|---------------|-------|-----------|------|--------|
-| chat          | ✓     | ✓         | ✓    | ✓      |
-| tool_call     | ✓     | ✓         | partial| ✗   |
-| config_read   | ✓     | ✓         | ✗    | ✗      |
-| config_write  | ✓     | ✗         | ✗    | ✗      |
-| session_mgmt  | ✓     | ✓         | own  | ✗      |
-| audit_logs    | ✓     | ✓         | ✗    | ✗      |
-"""
-
-from enum import Enum
-from typing import Set
-
-
-class Permission(str, Enum):
-    CHAT = "chat"                    # 发起对话
-    TOOL_CALL = "tool_call"          # 调用工具
-    TOOL_CALL_DANGEROUS = "tool_call.dangerous"  # 调用危险工具（代码执行、DB写操作）
-    CONFIG_READ = "config.read"      # 读取配置
-    CONFIG_WRITE = "config.write"    # 修改配置
-    SESSION_OWN = "session.own"      # 管理自己的会话
-    SESSION_ALL = "session.all"      # 管理所有会话
-    AUDIT_LOGS = "audit.logs"        # 查看审计日志
-    RAG_ACCESS = "rag.access"        # 访问知识库
-
-
-class Role:
-    """角色定义"""
-
-    def __init__(self, name: str, permissions: Set[Permission]):
-        self.name = name
-        self.permissions = permissions
-
-    def has_permission(self, permission: Permission) -> bool:
-        return permission in self.permissions
-
-
-# 预定义角色
-ROLES = {
-    "admin": Role("admin", set(Permission)),
-    "developer": Role("developer", {
-        Permission.CHAT, Permission.TOOL_CALL, Permission.CONFIG_READ,
-        Permission.SESSION_ALL, Permission.AUDIT_LOGS, Permission.RAG_ACCESS,
-    }),
-    "user": Role("user", {
-        Permission.CHAT, Permission.TOOL_CALL, Permission.SESSION_OWN,
-    }),
-    "viewer": Role("viewer", {
-        Permission.CHAT,
-    }),
-}
-
-
-class PermissionChecker:
-    """权限检查器"""
-
-    def __init__(self):
-        self._role_overrides: dict[str, Set[Permission]] = {}
-
-    def check(self, user_roles: list[str], permission: Permission) -> bool:
-        """检查用户是否有某项权限"""
-        for role_name in user_roles:
-            role = ROLES.get(role_name)
-            if role and role.has_permission(permission):
-                return True
-        return False
-
-    def filter_tools(self, tools: list[dict], user_roles: list[str]) -> list[dict]:
-        """根据权限过滤可用工具"""
-        can_dangerous = self.check(user_roles, Permission.TOOL_CALL_DANGEROUS)
-
-        filtered = []
-        for tool in tools:
-            if tool.get("dangerous", False) and not can_dangerous:
-                continue
-            filtered.append(tool)
-        return filtered
-
-
-def get_permission_checker() -> PermissionChecker:
-    """获取全局权限检查器"""
-    import config.manager as cm
-    manager = cm.get_manager()
-    if not hasattr(manager, "_permission_checker"):
-        manager._permission_checker = PermissionChecker()
-    return manager._permission_checker
-```
-
----
-
-## 4. 内容过滤 `security/content_filter.py`
-
-```python
-"""
-输入输出内容过滤器。
-
-检测类型：
-- 敏感词过滤（关键词匹配）
-- PII 检测（个人身份信息脱敏）
-- Prompt 注入检测
-- 输出安全审查
-"""
-
-import re
-from typing import List, Optional
-
-
-class ContentFilter:
-    """内容过滤器"""
-
-    # 常见 prompt injection 模式
-    INJECTION_PATTERNS = [
-        r"(?i)ignore\s+previous\s+instructions",
-        r"(?i)disregard\s+(the\s+)?system\s*(prompt|message)",
-        r"(?i)you\s+are\s+now\s+called",
-        r"(?i)forget\s+your\s+(instructions|rules)",
-        r"(?i)repeat\s+the\s+above",
-        r"(?i)output\s+(the|your)\s*(system|full)\s*prompt",
-    ]
-
-    # PII 模式（简化版）
-    PII_PATTERNS = {
-        "email": re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
-        "phone_cn": re.compile(r"1[3-9]\d{9}"),
-        "id_card": re.compile(r"\d{17}[\dXx]"),
-        "credit_card": re.compile(r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b"),
-    }
-
-    def __init__(self, sensitive_words: List[str] = None):
-        self.sensitive_words = set(sensitive_words or [])
-        self._injection_regexes = [re.compile(p) for p in self.INJECTION_PATTERNS]
-
-    def check_injection(self, text: str) -> bool:
-        """检测 prompt 注入攻击"""
-        return any(rx.search(text) for rx in self._injection_regexes)
-
-    def detect_pii(self, text: str) -> List[dict]:
-        """检测 PII（个人身份信息）"""
-        findings = []
-        for pii_type, pattern in self.PII_PATTERNS.items():
-            for match in pattern.finditer(text):
-                findings.append({
-                    "type": pii_type,
-                    "start": match.start(),
-                    "end": match.end(),
-                    "value": "***" + match.group()[-4:],  # 部分遮蔽
-                })
-        return findings
-
-    def mask_pii(self, text: str) -> str:
-        """脱敏 PII"""
-        masked = text
-        for pii_type, pattern in self.PII_PATTERNS.items():
-            masked = pattern.sub("[REDACTED]", masked)
-        return masked
-
-    def check_sensitive_words(self, text: str) -> List[str]:
-        """检测敏感词"""
-        found = []
-        text_lower = text.lower()
-        for word in self.sensitive_words:
-            if word.lower() in text_lower:
-                found.append(word)
-        return found
-
-    def filter_input(self, text: str) -> dict:
-        """
-        输入过滤，返回检查结果。
-
-        Returns:
-            {
-                "allowed": True/False,
-                "reasons": ["injection_detected", ...],
-                "masked_text": "...",
-                "pii_found": [...],
-            }
-        """
-        reasons = []
-        masked_text = text
-
-        if self.check_injection(text):
-            reasons.append("prompt_injection_detected")
-
-        pii_findings = self.detect_pii(text)
-        if pii_findings:
-            reasons.append(f"pii_found ({len(pii_findings)} items)")
-            masked_text = self.mask_pii(text)
-
-        sensitive = self.check_sensitive_words(text)
-        if sensitive:
-            reasons.append(f"sensitive_words ({', '.join(sensitive)})")
-
-        return {
-            "allowed": len(reasons) == 0,
-            "reasons": reasons,
-            "masked_text": masked_text,
-            "pii_found": pii_findings,
+    def create_token(self, user_id: str, permissions: list[str], expires_in: int = 3600) -> str:
+        """创建 JWT Token"""
+        import jwt
+        payload = {
+            "sub": user_id,
+            "perms": permissions,
+            "iat": time.time(),
+            "exp": time.time() + expires_in,
         }
+        return jwt.encode(payload, self._secret, algorithm=self._algorithm)
+
+    def verify_token(self, token: str) -> dict[str, Any]:
+        """验证并解析 JWT Token"""
+        import jwt
+        try:
+            payload = jwt.decode(token, self._secret, algorithms=[self._algorithm])
+            return payload
+        except jwt.ExpiredSignatureError:
+            logger.warning("JWT token expired")
+            raise PermissionError("Token expired")
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"Invalid JWT token: {e}")
+            raise PermissionError("Invalid token")
 
 
-class OutputFilter:
-    """输出过滤器（审查 LLM 回复）"""
+class AuthMiddleware:
+    """
+    认证中间件（FastAPI / Starlette）。
 
-    def __init__(self, content_filter: ContentFilter):
-        self._filter = content_filter
+    Usage:
+        auth = AuthMiddleware(api_key_store=store, jwt_manager=jwt_mgr)
+        # In FastAPI dependency:
+        # user_id = await auth.authenticate(request)
+    """
 
-    async def check(self, text: str) -> dict:
-        """检查 LLM 输出是否安全"""
-        pii_findings = self._filter.detect_pii(text)
-        sensitive = self._filter.check_sensitive_words(text)
+    def __init__(self, api_key_store: APIKeyStore, jwt_manager: JWTManager | None = None):
+        self._api_keys = api_key_store
+        self._jwt = jwt_manager
 
-        return {
-            "safe": len(pii_findings) == 0 and len(sensitive) == 0,
-            "pii_count": len(pii_findings),
-            "sensitive_words": sensitive,
-        }
+    async def authenticate(self, request: Any) -> str:
+        """
+        从请求中提取并验证认证信息，返回 user_id。
+
+        优先级：JWT Bearer > X-API-Key header > api_key query param
+        """
+        # 1. JWT Bearer Token
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer ") and self._jwt:
+            token = auth_header[7:]
+            payload = self._jwt.verify_token(token)
+            return payload["sub"]
+
+        # 2. X-API-Key header
+        api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+        if api_key:
+            record = self._api_keys.verify(api_key)
+            if not record:
+                raise PermissionError("Invalid API key")
+            if not record.is_active:
+                raise PermissionError("API key is deactivated")
+            if record.expires_at and time.time() > record.expires_at:
+                raise PermissionError("API key has expired")
+            return record.user_id
+
+        raise PermissionError("No authentication provided")
 ```
 
 ---
 
-## 5. 速率限制 `security/rate_limiter.py`
+## 4. 速率限制 `security/rate_limit.py`
 
 ```python
 """
-速率限制器 —— 按 API key / IP 限流。
+速率限制器。
 
-算法：滑动窗口计数器（Sliding Window Counter）
+支持：
+- 滑动窗口计数器（精确）
+- Token Bucket（平滑限流）
 """
 
+import asyncio
+import logging
 import time
 from collections import defaultdict
-from typing import Optional
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
-class RateLimitEntry:
-    """单个窗口的请求计数"""
+@dataclass
+class RateLimitConfig:
+    """速率限制配置"""
+    requests_per_minute: int = 60
+    requests_per_hour: int = 1000
+    burst_size: int = 10          # Token Bucket 突发容量
 
-    def __init__(self, window_start: float, count: int = 0):
-        self.window_start = window_start
-        self.count = count
 
+class SlidingWindowLimiter:
+    """滑动窗口计数器限流器"""
 
-class RateLimiter:
-    """滑动窗口速率限制器"""
+    def __init__(self):
+        # key → list of timestamps
+        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
-    def __init__(self, default_rpm: int = 60, window_seconds: float = 60.0):
-        self.default_rpm = default_rpm
-        self.window_seconds = window_seconds
-        self._requests: dict[str, list[RateLimitEntry]] = defaultdict(list)
-
-    def is_allowed(self, key: str, limit: Optional[int] = None) -> tuple[bool, dict]:
+    async def is_allowed(self, key: str, config: RateLimitConfig) -> tuple[bool, dict]:
         """
         检查请求是否允许。
 
-        Returns:
-            (allowed, info_dict)
-            info_dict: {"remaining": N, "limit": N, "retry_after": seconds}
+        Returns: (allowed, info_dict)
         """
-        effective_limit = limit or self.default_rpm
         now = time.time()
-        window_start = now - self.window_seconds
+        async with self._lock:
+            timestamps = self._requests[key]
 
-        # 清理过期窗口
-        entries = self._requests[key]
-        self._requests[key] = [e for e in entries if e.window_start > window_start]
-        entries = self._requests[key]
+            # 清理过期记录（1小时窗口）
+            hour_ago = now - 3600
+            timestamps[:] = [t for t in timestamps if t > hour_ago]
 
-        # 计算当前窗口总计数
-        total_count = sum(e.count for e in entries)
+            # 检查分钟级限制
+            minute_ago = now - 60
+            minute_count = sum(1 for t in timestamps if t > minute_ago)
 
-        if total_count >= effective_limit:
-            # 找到最早窗口的过期时间
-            oldest = min(entries, key=lambda e: e.window_start)
-            retry_after = oldest.window_start + self.window_seconds - now
-            return False, {
-                "remaining": 0,
-                "limit": effective_limit,
-                "retry_after": max(0.1, retry_after),
+            # 检查小时级限制
+            hour_count = len(timestamps)
+
+            info = {
+                "minute_count": minute_count,
+                "minute_limit": config.requests_per_minute,
+                "hour_count": hour_count,
+                "hour_limit": config.requests_per_hour,
+                "retry_after": 0,
             }
 
-        # 添加当前请求到最新窗口
-        current_window = None
-        for e in entries:
-            if abs(e.window_start - now) < 1.0:
-                current_window = e
-                break
+            if minute_count >= config.requests_per_minute:
+                # 计算需要等待的时间
+                oldest_in_minute = next((t for t in sorted(timestamps) if t > minute_ago), now)
+                info["retry_after"] = max(1, int(60 - (now - oldest_in_minute)))
+                logger.warning(f"Rate limit exceeded (minute): key={key}")
+                return False, info
 
-        if current_window:
-            current_window.count += 1
-        else:
-            entries.append(RateLimitEntry(window_start=now, count=1))
+            if hour_count >= config.requests_per_hour:
+                info["retry_after"] = 3600
+                logger.warning(f"Rate limit exceeded (hour): key={key}")
+                return False, info
 
-        return True, {
-            "remaining": effective_limit - total_count - 1,
-            "limit": effective_limit,
-            "retry_after": 0,
-        }
-
-    def reset(self, key: str):
-        """重置指定 key 的计数"""
-        self._requests.pop(key, None)
+            # 记录本次请求
+            timestamps.append(now)
+            return True, info
 
 
-def get_rate_limiter() -> RateLimiter:
-    """获取全局速率限制器"""
-    import config.manager as cm
-    manager = cm.get_manager()
-    if not hasattr(manager, "_rate_limiter"):
-        settings = (manager.settings.security or {}).get("rate_limit", {})
-        manager._rate_limiter = RateLimiter(
-            default_rpm=settings.get("default_rpm", 60),
-            window_seconds=settings.get("window_seconds", 60.0),
+class TokenBucketLimiter:
+    """Token Bucket 限流器（适合平滑限流）"""
+
+    def __init__(self):
+        # key → {tokens, last_refill}
+        self._buckets: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+
+    async def is_allowed(
+        self, key: str, rate: float = 10.0, burst: int = 20
+    ) -> tuple[bool, dict]:
+        """
+        检查并消费一个 token。
+
+        Args:
+            rate: 每秒补充的 token 数
+            burst: bucket 最大容量
+        """
+        now = time.time()
+        async with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = {"tokens": burst, "last_refill": now}
+
+            bucket = self._buckets[key]
+            # 补充 token
+            elapsed = now - bucket["last_refill"]
+            bucket["tokens"] = min(burst, bucket["tokens"] + elapsed * rate)
+            bucket["last_refill"] = now
+
+            if bucket["tokens"] >= 1:
+                bucket["tokens"] -= 1
+                return True, {"remaining_tokens": bucket["tokens"]}
+            else:
+                retry_after = (1 - bucket["tokens"]) / rate
+                return False, {"retry_after": retry_after}
+
+
+class RateLimitMiddleware:
+    """速率限制中间件"""
+
+    def __init__(self):
+        self._sliding_window = SlidingWindowLimiter()
+        self._token_bucket = TokenBucketLimiter()
+        self._configs: dict[str, RateLimitConfig] = {}  # user_id → config
+
+    def set_config(self, user_id: str, config: RateLimitConfig):
+        self._configs[user_id] = config
+
+    async def check_rate_limit(
+        self, user_id: str, endpoint: str = "/"
+    ) -> tuple[bool, dict]:
+        """检查速率限制"""
+        config = self._configs.get(user_id, RateLimitConfig())
+        key = f"{user_id}:{endpoint}"
+
+        # 先用 Token Bucket 做快速判断（突发流量）
+        allowed, info = await self._token_bucket.is_allowed(
+            key, rate=config.requests_per_minute / 60, burst=config.burst_size
         )
-    return manager._rate_limiter
+
+        if not allowed:
+            return False, info
+
+        # 再用滑动窗口做精确统计
+        allowed, info = await self._sliding_window.is_allowed(key, config)
+        return allowed, info
+```
+
+---
+
+## 5. 内容安全过滤 `security/content_filter.py`
+
+```python
+"""
+内容安全过滤器。
+
+双向检查：
+- Input Filter: 用户输入 → 检测敏感词、prompt 注入、恶意代码
+- Output Filter: Agent 输出 → 检测不当内容、信息泄露
+"""
+
+import logging
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
-async def rate_limit_middleware(request, call_next):
-    """FastAPI middleware"""
-    from fastapi import HTTPException
+class ThreatLevel(str, Enum):
+    SAFE = "safe"
+    LOW = "low"           # 可疑，可警告通过
+    MEDIUM = "medium"     # 需要人工审核
+    HIGH = "high"         # 直接阻断
 
-    public_paths = ["/health", "/ready", "/metrics"]
-    if any(request.url.path.startswith(p) for p in public_paths):
-        return await call_next(request)
 
-    rate_limiter = get_rate_limiter()
+@dataclass
+class FilterResult:
+    """过滤结果"""
+    is_safe: bool
+    threat_level: ThreatLevel
+    blocked_reasons: list[str] = field(default_factory=list)
+    sanitized_content: str = ""   # 清洗后的内容（可选）
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    # 优先使用 API key，否则使用 IP
-    limit_key = None
-    rpm_limit = None
 
-    if hasattr(request.state, "api_key"):
-        limit_key = request.state.api_key.name
-        rpm_limit = request.state.api_key.rate_limit_rpm
-    else:
-        limit_key = request.client.host
+class KeywordFilter:
+    """关键词过滤器"""
 
-    allowed, info = rate_limiter.is_allowed(limit_key, rpm_limit)
+    def __init__(self):
+        self._blocked_patterns: list[re.Pattern] = []
+        self._sensitive_words: set[str] = set()
 
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded",
-            headers={
-                "Retry-After": str(int(info["retry_after"]) + 1),
-                "X-RateLimit-Limit": str(info["limit"]),
-                "X-RateLimit-Remaining": "0",
-            },
+    def add_blocked_pattern(self, pattern: str, flags: int = re.IGNORECASE):
+        self._blocked_patterns.append(re.compile(pattern, flags))
+
+    def add_sensitive_words(self, words: list[str]):
+        self._sensitive_words.update(w.lower() for w in words)
+
+    def check(self, content: str) -> FilterResult:
+        """检查内容是否包含敏感词或匹配阻断模式"""
+        reasons = []
+        content_lower = content.lower()
+
+        # 精确关键词匹配
+        found_words = self._sensitive_words.intersection(
+            word.lower() for word in re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', content)
+        )
+        if found_words:
+            reasons.append(f"Contains sensitive words: {found_words}")
+
+        # 正则模式匹配
+        for pattern in self._blocked_patterns:
+            if pattern.search(content):
+                reasons.append(f"Matches blocked pattern: {pattern.pattern}")
+
+        if reasons:
+            return FilterResult(
+                is_safe=False,
+                threat_level=ThreatLevel.HIGH,
+                blocked_reasons=reasons,
+            )
+
+        return FilterResult(is_safe=True, threat_level=ThreatLevel.SAFE)
+
+
+class PromptInjectionDetector:
+    """Prompt 注入攻击检测器"""
+
+    # 常见 prompt 注入模式
+    INJECTION_PATTERNS = [
+        r"(?i)\bignore\s+previous\s+instructions\b",
+        r"(?i)\bdisregard\s+the\s+above\b",
+        r"(?i)system\s*:\s*",
+        r"(?i)<\s*system\s*>",
+        r"(?i)\byour\s+task\s+is\s+now\b",
+        r"(?i)\bforg(?:et|ive)\s+(?:all\s+)?instructions?\b",
+        r"(?i)repeat\s+the\s+above\s*(?:text|prompt|instructions)",
+        r"(?i)output\s+(?:your\s+)?system\s*(?:prompt|message|instructions)",
+        r"(?i)\`{3,}\s*system",           # ```system 代码块注入
+        r"(?i)^[\s\n]*(?:ACTIVATE|ENABLE|SET)\s+(?:DEVELOPER|DEBUG|ADMIN)\s+MODE",
+    ]
+
+    def __init__(self):
+        self._patterns = [re.compile(p) for p in self.INJECTION_PATTERNS]
+
+    def check(self, content: str) -> FilterResult:
+        """检测 prompt 注入攻击"""
+        reasons = []
+
+        for pattern in self._patterns:
+            match = pattern.search(content)
+            if match:
+                reasons.append(f"Possible prompt injection: '{match.group()[:50]}'")
+
+        # 检查嵌套指令（多层引号包裹的指令）
+        nested_count = content.count('"') + content.count("'")
+        if nested_count > 10 and len(content) < 2000:
+            reasons.append("Excessive quoting detected (possible injection)")
+
+        if not reasons:
+            return FilterResult(is_safe=True, threat_level=ThreatLevel.SAFE)
+
+        # 多条命中 → HIGH，单条命中 → MEDIUM
+        level = ThreatLevel.HIGH if len(reasons) >= 2 else ThreatLevel.MEDIUM
+        return FilterResult(
+            is_safe=False,
+            threat_level=level,
+            blocked_reasons=reasons,
         )
 
-    response = await call_next(request)
-    response.headers["X-RateLimit-Limit"] = str(info["limit"])
-    response.headers["X-RateLimit-Remaining"] = str(info["remaining"])
-    return response
+
+class OutputContentFilter:
+    """输出内容过滤器"""
+
+    # 检测可能的信息泄露模式
+    LEAK_PATTERNS = [
+        r"(?i)\bapi[_-]?key\s*[:=]\s*\S+",       # API Key 泄露
+        r"(?i)\bpassword\s*[:=]\s*\S+",           # 密码泄露
+        r"\b[A-Za-z0-9+/]{40,}={0,2}\b",          # Base64 encoded secrets
+        r"sk-[A-Za-z0-9]{20,}",                   # OpenAI API key pattern
+    ]
+
+    def __init__(self):
+        self._patterns = [re.compile(p) for p in self.LEAK_PATTERNS]
+
+    def check(self, content: str) -> FilterResult:
+        """检查输出内容是否包含敏感信息"""
+        reasons = []
+
+        for pattern in self._patterns:
+            match = pattern.search(content)
+            if match:
+                # 脱敏显示
+                matched = match.group()[:20] + "..."
+                reasons.append(f"Possible info leak detected near: '{matched}'")
+
+        if not reasons:
+            return FilterResult(is_safe=True, threat_level=ThreatLevel.SAFE)
+
+        level = ThreatLevel.MEDIUM
+        sanitized = content
+        for pattern in self._patterns:
+            sanitized = pattern.sub("[REDACTED]", sanitized)
+
+        return FilterResult(
+            is_safe=False,
+            threat_level=level,
+            blocked_reasons=reasons,
+            sanitized_content=sanitized,
+        )
+
+
+class ContentSecurityFilter:
+    """
+    综合内容安全过滤器。
+
+    Usage:
+        filter = ContentSecurityFilter()
+        # Check user input
+        result = await filter.check_input(user_message)
+        if not result.is_safe:
+            raise SecurityError(result.blocked_reasons)
+
+        # Check agent output
+        result = await filter.check_output(agent_response)
+    """
+
+    def __init__(self):
+        self._keyword_filter = KeywordFilter()
+        self._injection_detector = PromptInjectionDetector()
+        self._output_filter = OutputContentFilter()
+
+        # 默认敏感词
+        self._keyword_filter.add_sensitive_words([
+            "暴力", "恐怖", "自杀", "毒品", "赌博",
+        ])
+        self._keyword_filter.add_blocked_pattern(r"(?i)\b(?:eval|exec)\s*\(")
+
+    async def check_input(self, content: str) -> FilterResult:
+        """检查用户输入"""
+        results = [
+            self._keyword_filter.check(content),
+            self._injection_detector.check(content),
+        ]
+
+        for result in results:
+            if not result.is_safe and result.threat_level == ThreatLevel.HIGH:
+                return result
+
+        # 合并所有警告
+        all_reasons = []
+        max_level = ThreatLevel.SAFE
+        for result in results:
+            all_reasons.extend(result.blocked_reasons)
+            if result.threat_level.value > max_level.value:
+                max_level = result.threat_level
+
+        return FilterResult(
+            is_safe=len(all_reasons) == 0,
+            threat_level=max_level,
+            blocked_reasons=all_reasons,
+        )
+
+    async def check_output(self, content: str) -> FilterResult:
+        """检查 Agent 输出"""
+        result = self._output_filter.check(content)
+        return result
 ```
 
 ---
@@ -505,97 +684,269 @@ async def rate_limit_middleware(request, call_next):
 
 ```python
 """
-操作审计日志。
+审计日志系统。
 
-记录所有关键操作，用于合规审查和安全分析。
+记录所有关键操作，支持查询和导出。
 """
 
 import json
-from datetime import datetime, timezone
+import logging
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AuditEntry:
+    """审计日志条目"""
+    timestamp: float
+    user_id: str
+    action: str             # "api_call" | "agent_run" | "config_change" | ...
+    resource_type: str      # "agent" | "workspace" | "tool" | ...
+    resource_id: str        # 资源 ID
+    outcome: str            # "success" | "failure" | "denied"
+    details: dict[str, Any] = field(default_factory=dict)
+    ip_address: str = ""
+    user_agent: str = ""
+
+
+class BaseAuditStore(Protocol):
+    """审计存储后端协议"""
+
+    async def append(self, entry: AuditEntry) -> bool: ...
+    async def query(
+        self,
+        user_id: str | None = None,
+        action: str | None = None,
+        resource_type: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 100,
+    ) -> list[AuditEntry]: ...
+
+
+class JSONAuditStore(BaseAuditStore):
+    """JSON 文件审计存储（追加写入）"""
+
+    def __init__(self, log_dir: str = "./data/audit"):
+        self._log_dir = Path(log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+
+    async def append(self, entry: AuditEntry) -> bool:
+        """按日期分文件追加写入"""
+        date_str = time.strftime("%Y-%m-%d", time.localtime(entry.timestamp))
+        log_file = self._log_dir / f"audit_{date_str}.jsonl"
+
+        line = json.dumps(asdict(entry), ensure_ascii=False) + "\n"
+        log_file.write_text(line, mode="a", encoding="utf-8")
+        return True
+
+    async def query(
+        self, user_id=None, action=None, resource_type=None,
+        since=None, until=None, limit=100
+    ) -> list[AuditEntry]:
+        """查询审计日志"""
+        entries = []
+        for log_file in sorted(self._log_dir.glob("audit_*.jsonl")):
+            for line in log_file.read_text(encoding="utf-8").strip().split("\n"):
+                if not line:
+                    continue
+                data = json.loads(line)
+                entry = AuditEntry(**data)
+
+                # 过滤条件
+                if user_id and entry.user_id != user_id:
+                    continue
+                if action and entry.action != action:
+                    continue
+                if resource_type and entry.resource_type != resource_type:
+                    continue
+                if since and entry.timestamp < since:
+                    continue
+                if until and entry.timestamp > until:
+                    continue
+
+                entries.append(entry)
+                if len(entries) >= limit:
+                    return entries
+
+        return entries
 
 
 class AuditLogger:
-    """审计日志记录器"""
+    """
+    审计日志记录器。
 
-    def __init__(self):
-        self._logger = None  # 使用 observability/logging.py 的 JSON logger
+    Usage:
+        audit = AuditLogger(store=JSONAuditStore())
+        await audit.log_action(
+            user_id="user_001",
+            action="agent_run",
+            resource_type="agent",
+            resource_id="agent_abc",
+            outcome="success",
+            details={"model": "gpt-4o", "tokens_used": 500},
+        )
+    """
 
-    def log(
-        self, action: str, user_id: str = None, api_key_name: str = None,
-        resource: str = None, detail: dict = None, success: bool = True,
+    def __init__(self, store: BaseAuditStore):
+        self._store = store
+
+    async def log_action(
+        self,
+        user_id: str,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        outcome: str,
+        details: dict[str, Any] | None = None,
+        ip_address: str = "",
+        user_agent: str = "",
     ):
-        """记录审计事件"""
-        from observability.logging import setup_logging
+        entry = AuditEntry(
+            timestamp=time.time(),
+            user_id=user_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            outcome=outcome,
+            details=details or {},
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        await self._store.append(entry)
 
-        if not self._logger:
-            self._logger = __import__("logging").getLogger("audit")
-
-        log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "user_id": user_id,
-            "api_key_name": api_key_name,
-            "resource": resource,
-            "success": success,
-            "detail": detail or {},
-        }
-
-        self._logger.info(
-            json.dumps(log_entry, ensure_ascii=False),
-            extra={"module": "audit"},
+    async def log_api_call(
+        self, user_id: str, method: str, path: str, status_code: int,
+        duration_ms: float, details: dict[str, Any] | None = None,
+    ):
+        """记录 API 调用"""
+        await self.log_action(
+            user_id=user_id,
+            action="api_call",
+            resource_type="api",
+            resource_id=f"{method} {path}",
+            outcome="success" if status_code < 400 else "failure",
+            details={**(details or {}), "method": method, "status": status_code, "duration_ms": duration_ms},
         )
 
-
-def get_audit_logger() -> AuditLogger:
-    """获取全局审计日志记录器"""
-    import config.manager as cm
-    manager = cm.get_manager()
-    if not hasattr(manager, "_audit_logger"):
-        manager._audit_logger = AuditLogger()
-    return manager._audit_logger
+    async def log_security_event(
+        self, user_id: str, event_type: str, severity: str,
+        details: dict[str, Any] | None = None,
+    ):
+        """记录安全事件"""
+        await self.log_action(
+            user_id=user_id,
+            action=f"security:{event_type}",
+            resource_type="security",
+            resource_id=event_type,
+            outcome=severity,
+            details=details or {},
+        )
 ```
 
 ---
 
-## 7. YAML 配置 `security` section
+## 7. YAML 配置 `config/security.yaml`
 
 ```yaml
-# config/settings.yaml (新增)
 security:
-  api_keys:
-    - name: "admin-key"
-      secret: "${ADMIN_API_KEY}"       # 从环境变量读取
-      roles: ["admin"]
-      rate_limit_rpm: 120
-      expires_at: ""                   # ISO8601，空 = 永不过期
+  auth:
+    api_key:
+      enabled: true
+      header_name: "X-API-Key"
 
-    - name: "dev-key"
-      secret: "${DEV_API_KEY}"
-      roles: ["developer"]
-      rate_limit_rpm: 60
-
-  rate_limit:
-    default_rpm: 30                    # 未认证请求的默认限流
-    window_seconds: 60.0
-
-  content_filter:
-    enabled: true
-    sensitive_words: []                # 自定义敏感词列表
-    pii_detection: true
-    injection_detection: true
+    jwt:
+      enabled: true
+      secret_key: "${JWT_SECRET}"       # 环境变量引用
+      algorithm: "HS256"
+      token_expiry_seconds: 3600        # 1 hour
 
   rbac:
-    default_role: "user"              # 未指定角色时的默认值
+    default_role: "user"                # 新用户默认角色
+    workspace_isolation: true           # 工作空间隔离
+
+  rate_limit:
+    enabled: true
+    default:
+      requests_per_minute: 60
+      requests_per_hour: 1000
+      burst_size: 10
+    tiers:
+      free: { rpm: 20, rph: 500 }
+      pro: { rpm: 60, rph: 3000 }
+      enterprise: { rpm: 200, rph: 10000 }
+
+  content_filter:
+    input_filter:
+      enabled: true
+      sensitive_words_file: "./config/sensitive_words.txt"
+      block_code_execution: true        # 阻止 eval/exec 等危险操作
+
+    prompt_injection:
+      enabled: true
+      threat_level_action:              # 不同威胁级别的处理方式
+        medium: "warn_and_pass"         # warn_and_pass | block
+        high: "block"
+
+    output_filter:
+      enabled: true
+      redact_secrets: true              # 自动脱敏 API Key、密码等
+
+  audit:
+    enabled: true
+    store_type: "json_file"             # json_file | database
+    log_dir: "./data/audit"
+    retention_days: 90                  # 日志保留天数
 ```
 
 ---
 
-## 8. 设计总结
+## 8. 架构总览
+
+```
+                    ┌─────────────────────┐
+                    │     HTTP Request     │
+                    └──────────┬──────────┘
+                               ▼
+              ┌──────────────────────────────────┐
+              │      Auth Middleware             │
+              │  JWT / API Key → user_id         │
+              └──────────┬───────────────────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼               ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────┐
+   │ Rate Limit │ │ RBAC Check │ │ Content    │
+   │ (Token     │ │ (role +    │ │ Filter     │
+   │  Bucket)   │ │  workspace)│ │ (input)    │
+   └────────────┘ └────────────┘ └────────────┘
+                         │
+                         ▼ All passed
+              ┌───────────────────────────┐
+              │       Agent Core          │
+              │                           │
+              │  Content Filter (output)  │
+              └──────────┬────────────────┘
+                         │
+                         ▼
+              ┌───────────────────────────┐
+              │      Audit Logger         │
+              │  (append-only log)        │
+              └───────────────────────────┘
+```
+
+---
+
+## 9. 设计总结
 
 | 特性 | 实现方式 |
 |------|---------|
-| **API Key 认证** | SHA-256 hash + HMAC compare，支持过期控制 |
-| **RBAC** | 4 级角色（admin/developer/user/viewer），权限矩阵过滤工具 |
-| **内容过滤** | Prompt 注入检测、PII 脱敏、敏感词拦截 |
-| **速率限制** | 滑动窗口计数器，按 API key / IP 限流 |
-| **审计日志** | JSON 格式记录所有关键操作 |
+| **认证** | API Key（哈希存储）+ JWT Token，中间件统一处理 |
+| **授权** | RBAC 四级角色 + 工作空间隔离 |
+| **速率限制** | Token Bucket（突发流量）+ Sliding Window（精确统计） |
+| **内容过滤** | 关键词 + Prompt 注入检测 + 输出脱敏 |
+| **审计日志** | JSONL 追加写入，按日期分文件，支持多条件查询 |

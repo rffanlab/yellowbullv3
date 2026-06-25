@@ -8,7 +8,8 @@
 | 02 | LLM 抽象层 | [02-llm-abstraction.md](./02-llm-abstraction.md) |
 | 03 | 工具系统 | [03-tool-system.md](./03-tool-system.md) |
 | 04 | Session 管理 | [04-session-manager.md](./04-session-manager.md) |
-| 05 | Agent Core | [05-agent-core.md](./05-agent-core.md) |
+| 05 | Tool Executor | [05-tool-executor.md](./05-tool-executor.md) |
+| 06 | Agent Core | [06-agent-core.md](./06-agent-core.md) |
 | 06 | API Server | [06-api-server.md](./06-api-server.md) |
 | 07 | 可观测性 | [07-observability.md](./07-observability.md) |
 | 08 | RAG | [08-rag.md](./08-rag.md) |
