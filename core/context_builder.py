@@ -99,6 +99,7 @@ class ContextBuilder:
         window_size: int = 48,
         compression: CompressionConfig | None = None,
         llm: BaseLLM | None = None,
+        work_dir: str | None = None,
     ) -> list[LLMMessage]:
         """Build context messages with token-aware truncation.
 
@@ -107,12 +108,25 @@ class ContextBuilder:
             window_size: Max tokens for the context window (not message count).
             compression: Optional config for summarizing older turns.
             llm: Optional LLM instance for generating summaries via API.
+            work_dir: Working directory to inject into system prompt.
         """
         if compression is None:
             compression = CompressionConfig()
 
         raw_msgs = session.get_context_messages(window_size)
-        messages = [LLMMessage(role=Role.SYSTEM, content=self.system_prompt)]
+
+        # Build effective system prompt with work_dir injection
+        effective_prompt = self.system_prompt
+        if work_dir:
+            effective_prompt += (
+                f"\n\n## Working Directory\n"
+                f"- Your working directory is: `{work_dir}`\n"
+                f"- All file and folder operations MUST be performed within this directory.\n"
+                f"- When creating files or folders, use absolute paths under `{work_dir}`.\n"
+                f"- Example: to create a file named `test.py`, the path should be `{work_dir}\\test.py` (Windows) or `{work_dir}/test.py` (Linux/Mac).\n"
+            )
+
+        messages = [LLMMessage(role=Role.SYSTEM, content=effective_prompt)]
 
         # Convert to LLM format first
         llm_msgs: list[LLMMessage] = []

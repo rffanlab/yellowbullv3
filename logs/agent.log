@@ -14,3 +14,36 @@
 {"timestamp": "2026-06-24T13:06:30.201257Z", "level": "INFO", "logger": "core.agent", "message": "Final response generated", "session_id": "4aaa64bd-6de4-4897-acdc-e9d51f7e610c"}
 {"timestamp": "2026-06-25T06:23:24.982993Z", "level": "INFO", "logger": "core.agent", "message": "Processing request", "session_id": "daac050c-f34e-423b-80fc-bf9ff77f7c81", "user_id": "cli_user"}
 {"timestamp": "2026-06-25T06:23:49.308594Z", "level": "WARNING", "logger": "core.agent", "message": "Max chain depth exceeded", "session_id": "daac050c-f34e-423b-80fc-bf9ff77f7c81"}
+{"timestamp": "2026-06-25T08:49:33.184598Z", "level": "INFO", "logger": "core.agent", "message": "Processing request", "session_id": "cdc7fc96-3104-4fba-b229-63c72e871f1e", "user_id": "cli_user"}
+{"timestamp": "2026-06-25T08:49:44.589067Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 0: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:44.589219Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 1/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:44.590259Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 0: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:44.590386Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 1/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:45.591490Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 1: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:45.591753Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 2/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:45.592191Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 1: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:45.592355Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 2/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:46.601213Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 2: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:46.601807Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 2: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:52.505098Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 0: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:52.505257Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 1/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:53.508674Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 1: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:49:53.508871Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 2/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:49:54.515729Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 2: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:00.105285Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 0: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:00.105483Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 1/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:50:01.117983Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 1: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:01.118165Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 2/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:50:02.126655Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 2: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:07.990042Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 0: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:07.990249Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 1/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:50:09.009747Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 1: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:09.011933Z", "level": "INFO", "logger": "core.tool_executor", "message": "Retrying create_file_folder (attempt 2/2) after 1.0s"}
+{"timestamp": "2026-06-25T08:50:10.024913Z", "level": "ERROR", "logger": "core.tool_executor", "message": "Tool 'create_file_folder' error on attempt 2: 'ToolResult' object has no attribute 'error'"}
+{"timestamp": "2026-06-25T08:50:15.731787Z", "level": "WARNING", "logger": "core.agent", "message": "Max chain depth exceeded", "session_id": "cdc7fc96-3104-4fba-b229-63c72e871f1e"}
+{"timestamp": "2026-06-25T09:45:35.128524Z", "level": "INFO", "logger": "core.agent", "message": "Processing request", "session_id": "381b1f5e-42cb-4b8c-9292-69ed4a34491e", "user_id": "cli_user"}
+{"timestamp": "2026-06-25T09:46:15.287150Z", "level": "WARNING", "logger": "core.agent", "message": "Max chain depth exceeded", "session_id": "381b1f5e-42cb-4b8c-9292-69ed4a34491e"}
+{"timestamp": "2026-06-25T10:21:39.800887Z", "level": "INFO", "logger": "core.agent", "message": "Processing request", "session_id": "5cbb97cf-0225-4e09-8a35-8b46734ad68f", "user_id": "cli_user"}
+{"timestamp": "2026-06-25T10:22:09.850333Z", "level": "WARNING", "logger": "core.agent", "message": "Max chain depth exceeded", "session_id": "5cbb97cf-0225-4e09-8a35-8b46734ad68f"}
+{"timestamp": "2026-06-25T11:17:10.463958Z", "level": "INFO", "logger": "core.agent", "message": "Processing request", "session_id": "7a5e0283-c987-476d-b653-6f9f6e1355c2", "user_id": "cli_user"}
+{"timestamp": "2026-06-25T11:19:54.550298Z", "level": "INFO", "logger": "core.agent", "message": "Final response generated", "session_id": "7a5e0283-c987-476d-b653-6f9f6e1355c2"}

@@ -1,5 +1,6 @@
 """Interactive REPL for YellowBull Agent with rich terminal rendering."""
 
+import os
 from typing import Any
 
 from config.settings import load_settings
@@ -16,13 +17,50 @@ import tools.builtins  # noqa: F401
 console = Console()
 
 
-def _print_welcome() -> None:
+def _print_welcome(work_dir: str | None = None) -> None:
     """Print welcome banner."""
+    lines = ["[bold blue]YellowBull Agent[/bold blue]\n"]
+    if work_dir:
+        lines.append(f"[dim]工作目录: {work_dir}[/dim]\n")
+    lines.append("[dim]交互式命令行 · 输入 /help 查看命令[/dim]")
     console.print(Panel.fit(
-        "[bold blue]YellowBull Agent[/bold blue]\n"
-        "[dim]交互式命令行 · 输入 /help 查看命令[/dim]",
+        "\n".join(lines),
         border_style="blue",
     ))
+
+
+def _ask_work_dir(agent: Agent, user_id: str) -> tuple[str, str]:
+    """Ask user for working directory and set it on the session.
+
+    Returns (session_id, work_dir).
+    """
+    while True:
+        try:
+            work_dir = console.input("[bold yellow]请输入工作目录路径（文件操作将在此目录下进行）:[/bold yellow] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]再见 👋[/dim]")
+            raise SystemExit
+
+        if not work_dir:
+            console.print("[red]工作目录不能为空，请重新输入。[/red]")
+            continue
+
+        # Normalize path
+        work_dir = os.path.abspath(work_dir)
+
+        # Verify directory exists, create if not
+        if not os.path.isdir(work_dir):
+            try:
+                os.makedirs(work_dir, exist_ok=True)
+                console.print(f"[green]✓ 已创建工作目录: {work_dir}[/green]")
+            except OSError as e:
+                console.print(f"[red]无法创建目录 {work_dir}: {e}[/red]")
+                continue
+
+        # Create session and set work_dir
+        session = agent.session_manager.create(user_id)
+        session.work_dir = work_dir
+        return session.session_id, work_dir
 
 
 def _print_help() -> None:
@@ -30,11 +68,12 @@ def _print_help() -> None:
     console.print(Panel(
         "[bold]可用命令:[/bold]\n\n"
         "  [cyan]/help[/cyan]      显示帮助信息\n"
-        "  [cyan]/new[/cyan]       创建新会话\n"
-        "  [cyan]/sessions[/cyan]    列出所有会话\n"
-        "  [cyan]/history[/cyan]     查看当前会话历史\n"
+        "  [cyan]/new[/cyan]       创建新会话（继承工作目录）\n"
+        "  [cyan]/workdir[/cyan]    查看或更改工作目录\n"
+        "  [cyan]/sessions[/cyan]   列出所有会话\n"
+        "  [cyan]/history[/cyan]    查看当前会话历史\n"
         "  [cyan]/clear[/cyan]      清屏\n"
-        "  [cyan]/quit[/cyan]      退出程序",
+        "  [cyan]/quit[/cyan]       退出程序",
         title="[bold]帮助[/bold]",
         border_style="dim",
     ))
@@ -105,10 +144,11 @@ async def run_cli(config_path: str | None = None) -> None:
     llm = create_llm(active_provider, provider_config)
     agent = Agent(settings, llm)
 
-    _print_welcome()
-
-    current_session_id: str | None = None
     user_id = "cli_user"
+
+    # Ask for working directory on startup
+    current_session_id, work_dir = _ask_work_dir(agent, user_id)
+    _print_welcome(work_dir)
 
     while True:
         try:
@@ -132,8 +172,40 @@ async def run_cli(config_path: str | None = None) -> None:
             elif cmd == "/help":
                 _print_help()
 
+            elif cmd == "/workdir":
+                if work_dir:
+                    console.print(f"[dim]当前工作目录: {work_dir}[/dim]")
+                else:
+                    console.print("[dim]未设置工作目录[/dim]")
+                # Allow changing with /workdir <path>
+                parts = text.split(maxsplit=1)
+                if len(parts) > 1:
+                    new_dir = os.path.abspath(parts[1].strip())
+                    if not os.path.isdir(new_dir):
+                        try:
+                            os.makedirs(new_dir, exist_ok=True)
+                        except OSError as e:
+                            console.print(f"[red]无法创建目录 {new_dir}: {e}[/red]")
+                            continue
+                    # Update current session work_dir
+                    if current_session_id:
+                        sess = agent.session_manager.get(current_session_id)
+                        if sess:
+                            sess.work_dir = new_dir
+                    work_dir = new_dir
+                    console.print(f"[green]✓ 工作目录已更改为: {work_dir}[/green]")
+
             elif cmd == "/new":
-                current_session_id = None
+                # Create new session inheriting work_dir from previous
+                old_work_dir = work_dir
+                if current_session_id:
+                    sess = agent.session_manager.get(current_session_id)
+                    if sess and sess.work_dir:
+                        old_work_dir = sess.work_dir
+                new_session = agent.session_manager.create(user_id)
+                new_session.work_dir = old_work_dir
+                current_session_id = new_session.session_id
+                work_dir = old_work_dir
                 console.print("[green]✓ 已创建新会话[/green]")
 
             elif cmd == "/sessions":

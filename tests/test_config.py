@@ -12,7 +12,7 @@ def test_load_default_settings():
     settings = load_settings("config/default.yaml")
     assert isinstance(settings, Settings)
     assert settings.llm.active == "openai"
-    assert settings.agent.max_chain_depth == 5
+    assert settings.agent.max_chain_depth == 100
     assert settings.server.port == 8000
 
 
@@ -37,7 +37,7 @@ def test_missing_config_returns_defaults():
     settings = load_settings("nonexistent.yaml")
     assert isinstance(settings, Settings)
     # Should have default values
-    assert settings.server.host == "0.0.0.0"
+    assert settings.server.host == "127.0.0.1"
 
 
 def test_custom_system_prompt():

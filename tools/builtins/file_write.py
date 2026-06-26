@@ -14,7 +14,7 @@ from tools.registry import register_tool
         "properties": {
             "filepath": {
                 "type": "string",
-                "description": "Absolute or relative path to the file.",
+                "description": "Absolute path to the file. Must start with a drive letter (e.g., D:\\) or root (/). Relative paths are NOT accepted.",
             },
             "content": {
                 "type": "string",
@@ -45,6 +45,13 @@ class WriteFileTool(BaseTool):
         create_dirs: bool = True,
     ) -> ToolResult:
         try:
+            if not filepath.startswith(("/", "\\",)) and ":" not in filepath[:2]:
+                return ToolResult(
+                    content=f"Relative paths are not accepted. Please provide an absolute path (e.g., D:\\project\\file.py). Got: {filepath}",
+                    success=False,
+                    error="relative_path_not_allowed",
+                )
+
             target = Path(filepath).resolve()
 
             if target.exists() and target.is_dir():

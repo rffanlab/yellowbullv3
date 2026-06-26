@@ -72,16 +72,15 @@ class Agent:
         tool_results_log: list[ExecutionResult] = []
 
         # Main loop: LLM -> tools -> LLM until final answer
-        max_depth = self.settings.agent.max_chain_depth
-        for depth in range(max_depth):
+        for depth in range(self.settings.agent.max_chain_depth):
             session.state.chain_depth += 1
-            logger.debug(f"Chain depth {depth + 1}/{max_depth}", extra={
+            logger.debug(f"Chain depth {depth + 1}", extra={
                 "session_id": session.session_id,
             })
 
             # Build context and call LLM
             context = self.context_builder.build(
-                session, self.settings.agent.context_window
+                session, self.settings.agent.context_window, work_dir=session.work_dir
             )
             tools = ToolRegistry.to_function_definitions()
             response = await self.llm.chat(messages=context, tools=tools)

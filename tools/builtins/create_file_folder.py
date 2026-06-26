@@ -14,7 +14,7 @@ from tools.registry import register_tool
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Absolute or relative path to create.",
+                "description": "Absolute path to create. Must start with a drive letter (e.g., D:\\) or root (/). Relative paths are NOT accepted.",
             },
             "kind": {
                 "type": "string",
@@ -46,6 +46,15 @@ class CreateFileFolderTool(BaseTool):
         recursive: bool = True,
     ) -> ToolResult:
         try:
+            from pathlib import PureWindowsPath
+
+            if not path.startswith(("/", "\\",)) and ":" not in path[:2]:
+                return ToolResult(
+                    content=f"Relative paths are not accepted. Please provide an absolute path (e.g., D:\\project\\file.py). Got: {path}",
+                    success=False,
+                    error="relative_path_not_allowed",
+                )
+
             target = Path(path).resolve()
 
             if target.exists():

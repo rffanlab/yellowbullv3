@@ -3,6 +3,7 @@
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Optional
 
 from models.message import Message, MessageRole
 
@@ -22,6 +23,7 @@ class Session:
     user_id: str = ""
     messages: list[Message] = field(default_factory=list)
     state: SessionState = field(default_factory=SessionState)
+    work_dir: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 

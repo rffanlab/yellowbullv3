@@ -24,6 +24,7 @@ class ToolResult:
 
     content: str = ""
     success: bool = True
+    error: str = ""
 
 
 # ── Dependency injection support ───────────────────────────────────────

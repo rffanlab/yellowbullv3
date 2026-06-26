@@ -59,7 +59,7 @@ class AgentConfig(BaseModel):
         "You are a helpful AI assistant. You can use tools to help answer questions. "
         "Think step by step and provide clear, accurate responses."
     )
-    max_chain_depth: int = 20
+    max_chain_depth: int = 100
     context_window: int = 48
     tool_retry_limit: int = 2
     max_tool_calls_per_turn: int = 5

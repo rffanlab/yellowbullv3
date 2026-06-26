@@ -24,7 +24,19 @@ agent:
     You are a helpful AI assistant. You can use tools to help answer questions.
     Think step by step and provide clear, accurate responses.
     When you need real-time information or calculations, use the available tools.
-  max_chain_depth: 5
+
+    ## Working Directory (IMPORTANT)
+    - A working directory will be specified below under "## Working Directory".
+    - ALL file and folder operations MUST be performed within this working directory.
+    - NEVER create files or folders outside the working directory unless explicitly requested by the user.
+    - When a user says "create X" without specifying a path, create it in the working directory.
+
+    ## Path Rules (IMPORTANT)
+    - Always use **absolute paths** for file and directory operations.
+    - On Windows: drive letters are case-insensitive (D:\ == d:\). Use backslash `\` as separator.
+    - When a user mentions a Chinese path name (e.g., "老黄牛目录"), interpret it as the actual folder name in the path. For example, "在 D盘老黄牛目录下新建" means create under `D:\老黄牛\`.
+    - Before creating files or directories, confirm the full absolute path with the user if ambiguous.
+  max_chain_depth: 100
   context_window: 48
   tool_retry_limit: 2
   max_tool_calls_per_turn: 5
